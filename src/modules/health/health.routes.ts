@@ -22,7 +22,7 @@ healthRouter.get('/live', (_req, res) => {
   res.json({ status: 'ok', uptime: Math.round(process.uptime()) });
 });
 
-/** Readiness: dependencies reachable — used by Docker healthcheck / load balancers. */
+/** Readiness: dependencies reachable — used by uptime checks / load balancers. */
 healthRouter.get('/ready', async (_req, res) => {
   const [database, cache] = await Promise.all([check(() => prisma.$queryRaw`SELECT 1`), check(() => redis.ping())]);
   const ready = database.status === 'up' && cache.status === 'up';

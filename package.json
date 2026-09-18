@@ -5,12 +5,13 @@
   "description": "TimeFlow API server and background worker",
   "type": "commonjs",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
     "build": "prisma generate && tsc -p tsconfig.build.json",
+    "prestart": "prisma migrate deploy",
     "start": "node dist/src/server.js",
     "start:worker": "node dist/src/worker.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
