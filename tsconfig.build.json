@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "sourceMap": false },
+  "include": ["src", "prisma/seed.ts"],
+  "exclude": ["tests", "vitest.config.ts"]
+}

@@ -1,0 +1,351 @@
+// TimeFlow — Team & Project Management
+// PostgreSQL schema. Table/column names are snake_case in the database,
+// camelCase in the Prisma client.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  REVIEW
+  COMPLETED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+/// OUTBOUND rows are mail TimeFlow sent; INBOUND rows are replies to that mail,
+/// pulled from the sending account's inbox over IMAP.
+enum EmailDirection {
+  OUTBOUND
+  INBOUND
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  firstName    String     @map("first_name") @db.VarChar(80)
+  lastName     String     @map("last_name") @db.VarChar(80)
+  /// Always stored lower-cased. Uniqueness among non-deleted users is enforced
+  /// by the partial unique index `users_email_active_key` (see migration SQL).
+  email        String     @db.VarChar(254)
+  phone        String?    @db.VarChar(32)
+  passwordHash String     @map("password_hash")
+  avatarUrl    String?    @map("avatar_url")
+  status       UserStatus @default(ACTIVE)
+  roleId       String     @map("role_id") @db.Uuid
+  /// Bumped on password change / deactivation to invalidate issued access tokens.
+  tokenVersion Int        @default(0) @map("token_version")
+  lastLoginAt  DateTime?  @map("last_login_at") @db.Timestamptz(3)
+  /// UI preferences (theme, accent, density). A bag rather than columns so new
+  /// settings need no migration; the server validates the shape on write.
+  preferences  Json       @default("{}")
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt    DateTime?  @map("deleted_at") @db.Timestamptz(3)
+
+  role            Role            @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  managedProjects Project[]       @relation("ProjectManager")
+  createdProjects Project[]       @relation("ProjectCreator")
+  memberships     ProjectMember[]
+  assignedTasks   Task[]          @relation("TaskAssignee")
+  createdTasks    Task[]          @relation("TaskCreator")
+  activityLogs    ActivityLog[]
+  notifications   Notification[]
+  refreshTokens   RefreshToken[]
+  emailsReceived  EmailLog[]      @relation("EmailsReceived")
+  emailsSent      EmailLog[]      @relation("EmailsSent")
+
+  @@index([roleId])
+  @@index([status, deletedAt])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(60)
+  description String?  @db.VarChar(255)
+  /// System roles cannot be deleted; the Super Admin role cannot lose permissions.
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  /// e.g. "users.view"
+  key         String  @unique @db.VarChar(80)
+  module      String  @db.VarChar(40)
+  action      String  @db.VarChar(40)
+  description String? @db.VarChar(255)
+
+  roles RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String        @db.VarChar(120)
+  description String?
+  status      ProjectStatus @default(PLANNING)
+  priority    Priority      @default(MEDIUM)
+  startDate   DateTime      @map("start_date") @db.Date
+  endDate     DateTime?     @map("end_date") @db.Date
+  managerId   String        @map("manager_id") @db.Uuid
+  createdById String?       @map("created_by_id") @db.Uuid
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt   DateTime?     @map("deleted_at") @db.Timestamptz(3)
+
+  manager   User            @relation("ProjectManager", fields: [managerId], references: [id], onDelete: Restrict)
+  createdBy User?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  members   ProjectMember[]
+  tasks     Task[]
+
+  @@index([status, deletedAt])
+  @@index([managerId])
+  @@index([deletedAt, createdAt])
+  @@map("projects")
+}
+
+model ProjectMember {
+  projectId String   @map("project_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(3)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  /// Reverse lookup: "which projects is this user a member of" (scoping queries).
+  @@index([userId])
+  @@map("project_members")
+}
+
+model Task {
+  id          String     @id @default(uuid()) @db.Uuid
+  title       String     @db.VarChar(160)
+  description String?
+  projectId   String     @map("project_id") @db.Uuid
+  assigneeId  String?    @map("assignee_id") @db.Uuid
+  status      TaskStatus @default(TODO)
+  priority    Priority   @default(MEDIUM)
+  dueDate     DateTime?  @map("due_date") @db.Date
+  createdById String?    @map("created_by_id") @db.Uuid
+  completedAt DateTime?  @map("completed_at") @db.Timestamptz(3)
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt   DateTime?  @map("deleted_at") @db.Timestamptz(3)
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee  User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdBy User?   @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status])
+  @@index([assigneeId, status])
+  @@index([dueDate])
+  @@index([deletedAt, createdAt])
+  @@map("tasks")
+}
+
+model ActivityLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String?  @map("user_id") @db.Uuid
+  /// e.g. "user.created", "task.status_changed"
+  action      String   @db.VarChar(60)
+  /// e.g. "user", "role", "project", "task", "auth"
+  entity      String   @db.VarChar(40)
+  entityId    String?  @map("entity_id") @db.VarChar(64)
+  description String   @db.VarChar(500)
+  metadata    Json     @default("{}")
+  ipAddress   String?  @map("ip_address") @db.VarChar(64)
+  userAgent   String?  @map("user_agent") @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc)])
+  @@index([entity, entityId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action])
+  @@map("activity_logs")
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  type      String    @db.VarChar(60)
+  title     String    @db.VarChar(160)
+  body      String?   @db.VarChar(500)
+  link      String?   @db.VarChar(255)
+  readAt    DateTime? @map("read_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@map("notifications")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// SHA-256 of the opaque token; the raw token is never stored.
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  /// All tokens descending from one login share a family; reuse of a rotated
+  /// token revokes the whole family (token theft detection).
+  familyId   String    @map("family_id") @db.Uuid
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  replacedBy String?   @map("replaced_by") @db.Uuid
+  ipAddress  String?   @map("ip_address") @db.VarChar(64)
+  userAgent  String?   @map("user_agent") @db.VarChar(255)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Outbox-style record of every transactional email so queue behaviour
+/// (attempts, failures, retries) is observable from the database and UI.
+model EmailLog {
+  id          String      @id @default(uuid()) @db.Uuid
+  to          String      @db.VarChar(254)
+  fromAddress String      @map("from_address") @db.VarChar(254)
+  /// Display name of an inbound sender; outbound mail carries it in fromAddress.
+  fromName    String?     @map("from_name") @db.VarChar(120)
+  subject     String      @db.VarChar(200)
+  template    String      @db.VarChar(60)
+  direction   EmailDirection @default(OUTBOUND)
+  /// RFC 5322 Message-ID. Set on outbound mail when it is handed to SMTP, and
+  /// on inbound mail from its header, so replies can be matched to a thread.
+  messageId   String?     @unique @map("message_id") @db.VarChar(512)
+  /// The Message-ID this message answers, as the sender's client reported it.
+  inReplyTo   String?     @map("in_reply_to") @db.VarChar(512)
+  /// Rendered at enqueue time so the message is readable while QUEUED or FAILED,
+  /// not only once delivery succeeds.
+  bodyHtml    String?     @map("body_html")
+  bodyText    String?     @map("body_text")
+  /// Recipient — owns this message in their Inbox.
+  toUserId    String?     @map("to_user_id") @db.Uuid
+  /// Whoever triggered the send — owns this message in their Sent folder.
+  fromUserId  String?     @map("from_user_id") @db.Uuid
+  readAt      DateTime?   @map("read_at") @db.Timestamptz(3)
+  /// Threading: set when this message was composed as a reply to another.
+  replyToId   String?     @map("reply_to_id") @db.Uuid
+  /// Per-side soft delete. One row is both parties' copy of the message, so
+  /// each side hides it from their own folder without touching the other's.
+  deletedByToAt   DateTime? @map("deleted_by_to_at") @db.Timestamptz(3)
+  deletedByFromAt DateTime? @map("deleted_by_from_at") @db.Timestamptz(3)
+  status      EmailStatus @default(QUEUED)
+  attempts    Int         @default(0)
+  lastError   String?     @map("last_error") @db.VarChar(1000)
+  /// BullMQ job id. Composite ids (template + entity + recipient) run well past
+  /// 64 characters, so this is sized for them rather than for a bare UUID.
+  jobId       String?     @map("job_id") @db.VarChar(255)
+  sentAt      DateTime?   @map("sent_at") @db.Timestamptz(3)
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  toUser   User? @relation("EmailsReceived", fields: [toUserId], references: [id], onDelete: SetNull)
+  fromUser User? @relation("EmailsSent", fields: [fromUserId], references: [id], onDelete: SetNull)
+  replyTo  EmailLog?  @relation("EmailThread", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies  EmailLog[] @relation("EmailThread")
+
+  @@index([status, createdAt])
+  /// Unread badge: counts by recipient without reading rows.
+  @@index([toUserId, readAt, createdAt(sort: Desc)])
+  /// Inbox / Sent listings, which both exclude the caller's deleted copies.
+  @@index([toUserId, deletedByToAt, createdAt(sort: Desc)])
+  @@index([fromUserId, deletedByFromAt, createdAt(sort: Desc)])
+  @@map("email_logs")
+}
+
+/// Singleton row holding the organisation's outgoing-mail account, so it can be
+/// configured in the UI instead of by editing .env on the server. The password
+/// is stored encrypted (AES-256-GCM) and never leaves the backend.
+model MailSettings {
+  id            Int       @id @default(1)
+  host          String    @db.VarChar(255)
+  port          Int
+  secure        Boolean   @default(false)
+  username      String    @db.VarChar(254)
+  /// AES-256-GCM payload — never the raw password.
+  passwordEnc   String    @map("password_enc")
+  fromAddress   String    @map("from_address") @db.VarChar(254)
+  fromName      String    @default("TimeFlow") @map("from_name") @db.VarChar(80)
+  /// Set false to fall back to the SMTP_* environment variables.
+  enabled       Boolean   @default(true)
+  lastVerifiedAt DateTime? @map("last_verified_at") @db.Timestamptz(3)
+  updatedById   String?   @map("updated_by_id") @db.Uuid
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("mail_settings")
+}
+
+/// How far the inbound poller has read each account's mailbox. IMAP UIDs are
+/// only meaningful within one UIDVALIDITY, so a change there restarts the scan.
+model MailboxSyncState {
+  /// "<account>:<mailbox>", e.g. "team@gmail.com:INBOX".
+  id          String   @id @db.VarChar(320)
+  uidValidity BigInt   @map("uid_validity")
+  lastUid     Int      @map("last_uid")
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("mailbox_sync_state")
+}
