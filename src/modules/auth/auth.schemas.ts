@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { emailSchema } from '../../common/utils/validation';
+import { emailSchema, passwordSchema, trimmed } from '../../common/utils/validation';
 
 export const loginSchema = z
   .object({
@@ -9,6 +9,18 @@ export const loginSchema = z
   .strict();
 
 export type LoginInput = z.infer<typeof loginSchema>;
+
+/** Public self-registration. Role and status are never client-controlled. */
+export const registerSchema = z
+  .object({
+    firstName: trimmed(1, 80, 'First name'),
+    lastName: trimmed(1, 80, 'Last name'),
+    email: emailSchema,
+    password: passwordSchema,
+  })
+  .strict();
+
+export type RegisterInput = z.infer<typeof registerSchema>;
 
 /**
  * UI preferences, stored as a JSON bag on the user. Kept strict so a stray key

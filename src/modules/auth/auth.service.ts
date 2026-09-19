@@ -4,13 +4,18 @@ import { isTest } from '../../config/env';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
 import { sha256 } from '../../common/utils/crypto';
-import { ForbiddenError, NotFoundError, UnauthorizedError } from '../../common/errors';
+import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../common/errors';
 import { fullName } from '../../common/utils/request-context';
 import { activityService, type ActivityOrigin } from '../activity-logs/activity.service';
 import { rbacService } from '../permissions/rbac.service';
 import { withDefaults, type Preferences } from './auth.schemas';
+import { cache } from '../../cache/cache.service';
+import { producers } from '../../queue/producers';
 import { tokenService } from './token.service';
-import type { LoginInput } from './auth.schemas';
+import type { LoginInput, RegisterInput } from './auth.schemas';
+
+/** Role given to everyone who signs up themselves; admins can promote them later. */
+export const SIGNUP_ROLE = 'Employee';
 
 export const BCRYPT_COST = isTest ? 4 : 12;
 
@@ -92,6 +97,46 @@ export const authService = {
       entityId: user.id,
       description: `${fullName(user)} signed in`,
     });
+    return session;
+  },
+
+  /** Self-service sign-up: creates an active user with the default role and signs them in. */
+  async register(input: RegisterInput, client: ClientInfo): Promise<IssuedSession> {
+    const role = await prisma.role.findUnique({ where: { name: SIGNUP_ROLE }, select: { id: true } });
+    if (!role) {
+      logger.error({ role: SIGNUP_ROLE }, 'sign-up role is missing; run the seed');
+      throw new ForbiddenError('Sign-up is not available right now', 'SIGNUP_UNAVAILABLE');
+    }
+    const taken = await prisma.user.count({ where: { email: input.email, deletedAt: null } });
+    if (taken > 0) throw new ConflictError('An account with this email already exists', 'USER_EMAIL_EXISTS');
+
+    // Explicit field whitelist — request bodies are never spread into Prisma.
+    const user = await prisma.user.create({
+      data: {
+        firstName: input.firstName,
+        lastName: input.lastName,
+        email: input.email,
+        status: 'ACTIVE',
+        roleId: role.id,
+        passwordHash: await hashPassword(input.password),
+        lastLoginAt: new Date(),
+      },
+      select: { id: true, email: true, firstName: true, lastName: true, tokenVersion: true },
+    });
+
+    const session = await issueSession(user, client);
+    await cache.invalidate('dashboard');
+    void producers.welcomeEmail({ id: user.id, email: user.email, firstName: user.firstName }, user.id);
+    void activityService.record(
+      { actorId: user.id, ...client },
+      {
+        action: 'user.registered',
+        entity: 'user',
+        entityId: user.id,
+        description: `${fullName(user)} signed up`,
+        metadata: { email: user.email, role: SIGNUP_ROLE },
+      },
+    );
     return session;
   },
 

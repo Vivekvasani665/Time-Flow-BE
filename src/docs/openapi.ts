@@ -517,6 +517,29 @@ export const openApiDocument = {
         },
       },
     },
+    '/api/auth/register': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Sign up',
+        description:
+          'Creates an active account with the **Employee** role and signs it in. Rate limited like login. Sets `tf_access` and `tf_refresh` httpOnly cookies.',
+        requestBody: body({
+          type: 'object',
+          required: ['firstName', 'lastName', 'email', 'password'],
+          properties: {
+            firstName: str({ example: 'Sam' }),
+            lastName: str({ example: 'Rivera' }),
+            email: str({ example: 'sam@company.com' }),
+            password: str({ example: 'Signup1234', description: 'At least 8 characters, with a letter and a number' }),
+          },
+        }),
+        responses: {
+          '201': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '409': errorResponse('Email taken', 'USER_EMAIL_EXISTS', 'An account with this email already exists'),
+          ...errors(400, 429),
+        },
+      },
+    },
     '/api/auth/refresh': {
       post: {
         tags: ['Auth'],

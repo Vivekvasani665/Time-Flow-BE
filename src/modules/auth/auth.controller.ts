@@ -1,9 +1,9 @@
 import type { Request, Response } from 'express';
-import { ok } from '../../common/http/response';
+import { created, ok } from '../../common/http/response';
 import { requireAuth } from '../../common/utils/request-context';
 import { uuidParam } from '../../common/utils/validation';
 import { tokenService } from './token.service';
-import { loginSchema, updatePreferencesSchema } from './auth.schemas';
+import { loginSchema, registerSchema, updatePreferencesSchema } from './auth.schemas';
 import { authService } from './auth.service';
 
 const clientInfo = (req: Request) => ({ ip: req.ip ?? null, userAgent: req.get('user-agent')?.slice(0, 255) ?? null });
@@ -16,6 +16,14 @@ export const authController = {
     const user = await authService.getAuthUser(session.userId);
     // The access token is also returned for non-browser clients (Swagger, scripts).
     return ok(res, { user, accessToken: session.accessToken }, 'Signed in successfully');
+  },
+
+  async register(req: Request, res: Response) {
+    const input = registerSchema.parse(req.body);
+    const session = await authService.register(input, clientInfo(req));
+    tokenService.setAuthCookies(res, session.accessToken, session.refreshToken, session.refreshExpiresAt);
+    const user = await authService.getAuthUser(session.userId);
+    return created(res, { user, accessToken: session.accessToken }, 'Account created');
   },
 
   async refresh(req: Request, res: Response) {
