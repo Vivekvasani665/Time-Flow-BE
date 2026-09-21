@@ -7,6 +7,7 @@ export const projectRouter = Router();
 
 projectRouter.use(authenticate);
 projectRouter.get('/', requirePermission(P['projects.view']), projectController.list);
+projectRouter.get('/stats', requirePermission(P['projects.view']), projectController.stats);
 projectRouter.post('/', requirePermission(P['projects.create']), projectController.create);
 projectRouter.get('/:id', requirePermission(P['projects.view']), projectController.get);
 projectRouter.patch('/:id', requirePermission(P['projects.update']), projectController.update);

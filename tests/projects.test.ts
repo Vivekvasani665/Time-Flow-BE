@@ -114,3 +114,21 @@ describe('Project list caching (Redis)', () => {
     expect(scoped.body.meta.total).toBeLessThan(all.body.meta.total);
   });
 });
+
+describe('GET /api/projects/stats', () => {
+  it('counts projects per status and distinct people within the caller’s scope', async () => {
+    const [admin, employee] = await Promise.all([loginAs('admin'), loginAs('employee')]);
+
+    const all = await admin.auth(api().get('/api/projects/stats'));
+    expect(all.status).toBe(200);
+    const listed = await admin.auth(api().get('/api/projects')).query({ limit: 100 });
+    expect(all.body.data.total).toBe(listed.body.meta.total);
+    expect(all.body.data.byStatus.reduce((sum: number, g: { count: number }) => sum + g.count, 0)).toBe(all.body.data.total);
+    expect(all.body.data.members).toBeGreaterThan(0);
+
+    // Without projects.view_all the numbers only cover projects the user belongs to.
+    const mine = await employee.auth(api().get('/api/projects/stats'));
+    const mineListed = await employee.auth(api().get('/api/projects')).query({ limit: 100 });
+    expect(mine.body.data.total).toBe(mineListed.body.meta.total);
+  });
+});

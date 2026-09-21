@@ -632,6 +632,15 @@ export const openApiDocument = {
         'Redis cached — response header `X-Cache: HIT|MISS`. Without `projects.view_all` only projects you manage or belong to are returned.',
       deleteNote: 'Soft delete; the project’s tasks are soft-deleted in the same transaction.',
     }),
+    '/api/projects/stats': {
+      get: {
+        tags: ['Projects'],
+        summary: 'Project counts for the projects page',
+        description: `${perm('projects.view')} Counts per status, projects created in the last 7 days, distinct people (managers and members) and memberships added in the last 7 days — all within the projects you can see. Redis cached.`,
+        security: secured,
+        responses: { '200': { description: 'Project stats' }, ...errors(401, 403) },
+      },
+    },
 
     ...crud({
       tag: 'Tasks',

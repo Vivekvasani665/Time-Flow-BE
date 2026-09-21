@@ -12,6 +12,11 @@ export const projectController = {
     res.setHeader('X-Cache', hit ? 'HIT' : 'MISS');
     return paginated(res, value.items, value.meta);
   },
+  async stats(req: Request, res: Response) {
+    const { value, hit } = await projectService.stats(requireAuth(req));
+    res.setHeader('X-Cache', hit ? 'HIT' : 'MISS');
+    return ok(res, value);
+  },
   async get(req: Request, res: Response) {
     const { id } = uuidParam.parse(req.params);
     return ok(res, await projectService.get(requireAuth(req), id));

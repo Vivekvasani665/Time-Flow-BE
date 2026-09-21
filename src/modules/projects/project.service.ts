@@ -67,6 +67,25 @@ const notifyMembers = (userIds: string[], projectId: string, projectName: string
     link: `/projects/${projectId}`,
   }));
 
+export type ProjectStats = {
+  total: number;
+  byStatus: { status: Prisma.ProjectGroupByOutputType['status']; count: number }[];
+  newThisWeek: number;
+  /** Distinct people (managers and members) across the visible projects. */
+  members: number;
+  membersAddedThisWeek: number;
+  /** 14-day daily series (oldest → newest) powering the stat-card sparklines. */
+  trends: {
+    total: number[];
+    active: number[];
+    onHold: number[];
+    completed: number[];
+    members: number[];
+  };
+};
+
+const SPARK_DAYS = 14;
+
 export const projectService = {
   /** Cached per data scope. Mutations bump the namespace version. */
   async list(actor: AuthContext, query: ListProjectsQuery) {
@@ -91,6 +110,58 @@ export const projectService = {
         prisma.project.count({ where }),
       ]);
       return { items: await toProjects(records), meta: buildMeta(query.page, query.limit, total) };
+    });
+  },
+
+  /** Headline numbers for the projects page, within the caller's visible projects. */
+  async stats(actor: AuthContext) {
+    const scopeKey = actor.permissions.has('projects.view_all') ? 'all' : `u:${actor.id}`;
+    return cache.remember<ProjectStats>('projects', scopeKey, { view: 'stats' }, async () => {
+      const where = projectScope(actor);
+      const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+      const sparkSince = new Date();
+      sparkSince.setHours(0, 0, 0, 0);
+      sparkSince.setDate(sparkSince.getDate() - (SPARK_DAYS - 1));
+      const [byStatus, newThisWeek, managers, memberships, membersAddedThisWeek, recentProjects, recentMembers] = await Promise.all([
+        prisma.project.groupBy({ by: ['status'], where, _count: { _all: true } }),
+        prisma.project.count({ where: { AND: [where, { createdAt: { gte: weekAgo } }] } }),
+        prisma.project.findMany({ where, select: { managerId: true }, distinct: ['managerId'] }),
+        prisma.projectMember.findMany({ where: { project: where }, select: { userId: true }, distinct: ['userId'] }),
+        prisma.projectMember.count({ where: { project: where, joinedAt: { gte: weekAgo } } }),
+        prisma.project.findMany({ where: { AND: [where, { createdAt: { gte: sparkSince } }] }, select: { createdAt: true, status: true } }),
+        prisma.projectMember.findMany({ where: { project: where, joinedAt: { gte: sparkSince } }, select: { joinedAt: true } }),
+      ]);
+      const people = new Set([...managers.map((m) => m.managerId), ...memberships.map((m) => m.userId)]);
+
+      // Bucket recent rows into a daily series so each stat card can draw a real sparkline.
+      const emptySeries = () => new Array<number>(SPARK_DAYS).fill(0);
+      const trends = { total: emptySeries(), active: emptySeries(), onHold: emptySeries(), completed: emptySeries(), members: emptySeries() };
+      const dayIndex = (d: Date) => {
+        const day = new Date(d);
+        day.setHours(0, 0, 0, 0);
+        return Math.floor((day.getTime() - sparkSince.getTime()) / 86_400_000);
+      };
+      for (const p of recentProjects) {
+        const i = dayIndex(p.createdAt);
+        if (i < 0 || i >= SPARK_DAYS) continue;
+        trends.total[i] += 1;
+        if (p.status === 'ACTIVE') trends.active[i] += 1;
+        else if (p.status === 'ON_HOLD') trends.onHold[i] += 1;
+        else if (p.status === 'COMPLETED') trends.completed[i] += 1;
+      }
+      for (const m of recentMembers) {
+        const i = dayIndex(m.joinedAt);
+        if (i >= 0 && i < SPARK_DAYS) trends.members[i] += 1;
+      }
+
+      return {
+        total: byStatus.reduce((sum, g) => sum + g._count._all, 0),
+        byStatus: byStatus.map((g) => ({ status: g.status, count: g._count._all })),
+        newThisWeek,
+        members: people.size,
+        membersAddedThisWeek,
+        trends,
+      };
     });
   },
 
