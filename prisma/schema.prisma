@@ -67,7 +67,7 @@ model User {
   /// Bumped on password change / deactivation to invalidate issued access tokens.
   tokenVersion Int        @default(0) @map("token_version")
   lastLoginAt  DateTime?  @map("last_login_at") @db.Timestamptz(3)
-  /// UI preferences (theme, accent, density). A bag rather than columns so new
+  /// UI preferences (theme, density). A bag rather than columns so new
   /// settings need no migration; the server validates the shape on write.
   preferences  Json       @default("{}")
   createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)

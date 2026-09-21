@@ -27,22 +27,25 @@ export type RegisterInput = z.infer<typeof registerSchema>;
  * can never end up persisted, and every field optional on PATCH so the client
  * can send just what changed.
  */
-export const preferencesSchema = z
-  .object({
-    theme: z.enum(['dark', 'light', 'system']),
-    accent: z.enum(['cyan', 'violet', 'magenta', 'lime', 'amber']),
-    density: z.enum(['comfortable', 'compact']),
-  })
-  .strict();
+const preferenceFields = z.object({
+  theme: z.enum(['dark', 'light', 'system']),
+  density: z.enum(['comfortable', 'compact']),
+});
+
+export const preferencesSchema = preferenceFields.strict();
 
 export const updatePreferencesSchema = preferencesSchema.partial();
 
 export type Preferences = z.infer<typeof preferencesSchema>;
 
-export const DEFAULT_PREFERENCES: Preferences = { theme: 'light', accent: 'cyan', density: 'comfortable' };
+export const DEFAULT_PREFERENCES: Preferences = { theme: 'light', density: 'comfortable' };
 
-/** Anything unrecognised in the stored JSON falls back to the default. */
+/**
+ * Anything unrecognised in the stored JSON falls back to the default. Unknown keys
+ * (e.g. the retired `accent`) are dropped rather than failing the whole bag, and
+ * disappear from the database on the user's next save.
+ */
 export function withDefaults(stored: unknown): Preferences {
-  const parsed = preferencesSchema.partial().safeParse(stored);
+  const parsed = preferenceFields.partial().safeParse(stored);
   return { ...DEFAULT_PREFERENCES, ...(parsed.success ? parsed.data : {}) };
 }
