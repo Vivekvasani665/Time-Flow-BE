@@ -101,13 +101,14 @@ export const activityLogService = {
       conditions.push(Prisma.sql`description ILIKE ${pattern}`);
     }
 
-    const [daily, byEntity] = await Promise.all([
+    const [daily, byEntity, byAction] = await Promise.all([
       prisma.$queryRaw<{ day: string; count: number }[]>`
         SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, COUNT(*)::int AS count
         FROM activity_logs
         WHERE ${Prisma.join(conditions, ' AND ')}
         GROUP BY day`,
       prisma.activityLog.groupBy({ by: ['entity'], where, _count: { _all: true } }),
+      prisma.activityLog.groupBy({ by: ['action'], where, _count: { _all: true } }),
     ]);
 
     const counts = new Map(daily.map((d) => [d.day, d.count]));
@@ -123,6 +124,7 @@ export const activityLogService = {
       total: days.reduce((sum, d) => sum + d.count, 0),
       days,
       byEntity: byEntity.map((e) => ({ entity: e.entity, count: e._count._all })).sort((a, b) => b.count - a.count),
+      byAction: byAction.map((e) => ({ action: e.action, count: e._count._all })).sort((a, b) => b.count - a.count),
     };
   },
 

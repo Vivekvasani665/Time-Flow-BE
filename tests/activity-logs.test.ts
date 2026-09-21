@@ -35,6 +35,13 @@ describe('GET /api/activity-logs/stats', () => {
       { entity: 'stats_probe', count: 3 },
       { entity: 'stats_other', count: 1 },
     ]);
+    expect(data.byAction).toEqual(
+      expect.arrayContaining([
+        { action: 'stats.a', count: 2 },
+        { action: 'stats.b', count: 2 },
+      ]),
+    );
+    expect(data.byAction).toHaveLength(2);
   });
 
   it('applies the same filters as the list, treating % in search literally', async () => {
