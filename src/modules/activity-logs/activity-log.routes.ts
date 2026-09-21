@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { paginated } from '../../common/http/response';
+import { ok, paginated } from '../../common/http/response';
 import { authenticate, requirePermission } from '../../common/middleware/authenticate';
 import { fullName, getRequestContext } from '../../common/utils/request-context';
 import { P } from '../permissions/permission-catalog';
@@ -14,6 +14,10 @@ activityLogRouter.use(authenticate);
 activityLogRouter.get('/', requirePermission(P['activity_logs.view']), async (req: Request, res: Response) => {
   const { items, meta } = await activityLogService.list(listActivityQuerySchema.parse(req.query));
   return paginated(res, items, meta);
+});
+
+activityLogRouter.get('/stats', requirePermission(P['activity_logs.view']), async (req: Request, res: Response) => {
+  return ok(res, await activityLogService.stats(exportActivityQuerySchema.parse(req.query)));
 });
 
 activityLogRouter.get('/export', requirePermission(P['activity_logs.export']), async (req: Request, res: Response) => {

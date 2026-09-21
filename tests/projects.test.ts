@@ -61,14 +61,16 @@ describe('Project CRUD', () => {
 
 describe('Project scoping & authorization', () => {
   it('employees only see projects they belong to', async () => {
+    const visible = await superadmin.auth(api().post('/api/projects')).send(newProject());
+    const hidden = await superadmin.auth(api().post('/api/projects')).send(newProject({ memberIds: [zoeId] }));
+
     const res = await employee.auth(api().get('/api/projects')).query({ limit: 100 });
     expect(res.status).toBe(200);
     const names = res.body.data.map((p: { name: string }) => p.name);
-    expect(names).toContain('Website Redesign');
-    expect(names).not.toContain('Mobile App Launch');
+    expect(names).toContain(visible.body.data.name);
+    expect(names).not.toContain(hidden.body.data.name);
 
-    const hidden = await superadmin.auth(api().get('/api/projects')).query({ search: 'Mobile App Launch' });
-    expect((await employee.auth(api().get(`/api/projects/${hidden.body.data[0].id}`))).status).toBe(404);
+    expect((await employee.auth(api().get(`/api/projects/${hidden.body.data.id}`))).status).toBe(404);
   });
 
   it('employees cannot create projects', async () => {

@@ -606,7 +606,7 @@ export const openApiDocument = {
       filters: [],
       create: 'CreateRole',
       update: 'UpdateRole',
-      deleteNote: 'System roles cannot be deleted; roles with users return 409 `ROLE_IN_USE`.',
+      deleteNote: 'The Super Admin role cannot be deleted; roles with users return 409 `ROLE_IN_USE`.',
     }),
     '/api/roles/{id}/users': {
       get: {
@@ -666,6 +666,16 @@ export const openApiDocument = {
           q('to', date),
         ],
         responses: { '200': paginatedOf(ref('ActivityLog')), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/activity-logs/stats': {
+      get: {
+        tags: ['Activity Logs'],
+        summary: 'Activity counts per day and per entity',
+        description: `${perm('activity_logs.view')} Accepts the list filters. Without from/to covers the last 30 days; ranges are capped at 366 days. Days are UTC.`,
+        security: secured,
+        parameters: [q('search', str()), q('entity', str()), q('action', str()), q('userId', uuid), q('from', date), q('to', date)],
+        responses: { '200': { description: 'Daily and per-entity counts' }, ...errors(400, 401, 403) },
       },
     },
     '/api/activity-logs/export': {

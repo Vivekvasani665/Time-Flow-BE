@@ -7,7 +7,6 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '.
 import { fullName, type RequestContext } from '../../common/utils/request-context';
 import { activityService } from '../activity-logs/activity.service';
 import { rbacService } from '../permissions/rbac.service';
-import { SUPER_ADMIN_ROLE } from '../permissions/permission-catalog';
 import { userSelect } from '../users/user.repository';
 import type { CreateRoleInput, ListRolesQuery, RoleUsersQuery, UpdateRoleInput } from './role.schemas';
 
@@ -114,7 +113,7 @@ export const roleService = {
   async update(ctx: RequestContext, id: string, input: UpdateRoleInput) {
     const existing = await loadRole(id);
     if (input.name && input.name !== existing.name) {
-      if (existing.isSystem) throw new ForbiddenError('System roles cannot be renamed');
+      if (existing.isSystem) throw new ForbiddenError('The Super Admin role cannot be renamed');
       await assertNameAvailable(input.name, id);
     }
 
@@ -127,7 +126,7 @@ export const roleService = {
       const next = new Set(input.permissions);
       added = [...next].filter((k) => !current.has(k));
       removed = [...current].filter((k) => !next.has(k));
-      if ((added.length || removed.length) && existing.isSystem && existing.name === SUPER_ADMIN_ROLE) {
+      if ((added.length || removed.length) && existing.isSystem) {
         throw new ForbiddenError('Super Admin permissions cannot be changed');
       }
       permissionIds = await resolvePermissionIds(input.permissions);
@@ -182,7 +181,7 @@ export const roleService = {
 
   async remove(ctx: RequestContext, id: string) {
     const role = await loadRole(id);
-    if (role.isSystem) throw new ForbiddenError('System roles cannot be deleted');
+    if (role.isSystem) throw new ForbiddenError('The Super Admin role cannot be deleted');
 
     // Soft-deleted users still reference the role (FK RESTRICT), so count everyone.
     const assigned = await prisma.user.count({ where: { roleId: id } });

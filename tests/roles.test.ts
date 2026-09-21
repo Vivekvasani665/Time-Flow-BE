@@ -57,7 +57,7 @@ describe('Roles & permissions', () => {
     expect(res.body.code).toBe('VALIDATION_ERROR');
   });
 
-  it('refuses to delete a role that has users (ROLE_IN_USE) or is a system role', async () => {
+  it('refuses to delete a role that has users (ROLE_IN_USE) or the Super Admin role', async () => {
     const name = unique('Busy');
     const role = await superadmin.auth(api().post('/api/roles')).send({ name, permissions: ['tasks.view'] });
     await superadmin.auth(api().post('/api/users')).send({ firstName: 'B', lastName: 'Usy', email: `${unique('busy')}@timeflow.dev`, password: 'Password123!', roleId: role.body.data.id }).expect(201);
@@ -66,13 +66,24 @@ describe('Roles & permissions', () => {
     expect(inUse.status).toBe(409);
     expect(inUse.body.code).toBe('ROLE_IN_USE');
 
-    const system = await superadmin.auth(api().delete(`/api/roles/${await roleId('Employee')}`));
+    const system = await superadmin.auth(api().delete(`/api/roles/${await roleId('Super Admin')}`));
     expect(system.status).toBe(403);
   });
 
-  it('protects Super Admin permissions', async () => {
-    const res = await superadmin.auth(api().patch(`/api/roles/${await roleId('Super Admin')}`)).send({ permissions: ['users.view'] });
-    expect(res.status).toBe(403);
+  it('protects Super Admin permissions and name', async () => {
+    const id = await roleId('Super Admin');
+    expect((await superadmin.auth(api().patch(`/api/roles/${id}`)).send({ permissions: ['users.view'] })).status).toBe(403);
+    expect((await superadmin.auth(api().patch(`/api/roles/${id}`)).send({ name: unique('Boss') })).status).toBe(403);
+  });
+
+  it('lets the Super Admin rename a default role and change its permissions', async () => {
+    const created = await superadmin.auth(api().post('/api/roles')).send({ name: unique('Temp'), permissions: ['tasks.view'] });
+    const managerId = await roleId('Manager');
+    const res = await superadmin.auth(api().patch(`/api/roles/${managerId}`)).send({ name: unique('Lead') });
+    expect(res.status).toBe(200);
+    expect(res.body.data.isSystem).toBe(false);
+    await superadmin.auth(api().patch(`/api/roles/${managerId}`)).send({ name: 'Manager' }).expect(200);
+    await superadmin.auth(api().delete(`/api/roles/${created.body.data.id}`)).expect(200);
   });
 
   it('forbids admin (no roles.update) from editing roles', async () => {
