@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
+    "db:studio": "prisma studio",
     "build": "prisma generate && tsc -p tsconfig.build.json",
     "prestart": "prisma migrate deploy",
     "start": "node dist/src/server.js",
