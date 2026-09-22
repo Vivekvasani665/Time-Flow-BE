@@ -94,6 +94,7 @@ model User {
   notifications   Notification[]
   refreshTokens   RefreshToken[]
   recoveryCodes   TwoFactorRecoveryCode[]
+  loginOtps       LoginOtp[]
   emailsReceived  EmailLog[]              @relation("EmailsReceived")
   emailsSent      EmailLog[]              @relation("EmailsSent")
 
@@ -262,6 +263,29 @@ model TwoFactorRecoveryCode {
 
   @@unique([userId, codeHash])
   @@map("two_factor_recovery_codes")
+}
+
+/// Emailed one-time code that must follow the password when LOGIN_OTP_ENABLED
+/// is on. One row per sign-in attempt: its id is the `verificationId` the
+/// client holds, and a resend rotates the code on the same row.
+model LoginOtp {
+  id         String    @id @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// HMAC-SHA256 of the code, keyed by a server secret. A plain hash of a
+  /// 6-digit number could be reversed by trying all million values.
+  otpHash    String    @map("otp_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Wrong guesses against the current code; reset when a new code is sent.
+  attempts   Int       @default(0)
+  sendCount  Int       @default(1) @map("send_count")
+  lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  usedAt     DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("login_otps")
 }
 
 model RefreshToken {

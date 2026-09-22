@@ -20,6 +20,18 @@ export const twoFactorLoginSchema = z
   })
   .strict();
 
+export const verifyLoginOtpSchema = z
+  .object({
+    verificationId: z.uuid({ message: 'Invalid verification id' }),
+    otp: z
+      .string({ message: 'Code is required' })
+      .trim()
+      .regex(/^\d{6}$/, 'Enter the 6-digit code'),
+  })
+  .strict();
+
+export const resendLoginOtpSchema = z.object({ verificationId: z.uuid({ message: 'Invalid verification id' }) }).strict();
+
 export const twoFactorCodeSchema = z.object({ code: twoFactorCode }).strict();
 
 export const disableTwoFactorSchema = z

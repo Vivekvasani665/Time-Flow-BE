@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
-import { isTest } from '../../config/env';
+import { env, isTest } from '../../config/env';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
 import { sha256 } from '../../common/utils/crypto';
@@ -13,6 +13,7 @@ import { cache } from '../../cache/cache.service';
 import { producers } from '../../queue/producers';
 import { tokenService } from './token.service';
 import { twoFactorService } from './two-factor.service';
+import { loginOtpService, type LoginOtpChallenge } from './login-otp.service';
 import type { LoginInput, RegisterInput } from './auth.schemas';
 
 /** Role given to everyone who signs up themselves; admins can promote them later. */
@@ -76,11 +77,12 @@ async function issueSession(
 }
 
 export const authService = {
-  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge> {
+  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge | LoginOtpChallenge> {
     const user = await prisma.user.findFirst({
       where: { email: input.email, deletedAt: null },
       select: {
         id: true,
+        email: true,
         passwordHash: true,
         status: true,
         tokenVersion: true,
@@ -113,6 +115,9 @@ export const authService = {
       return { twoFactorRequired: true, challengeToken: challenge.token, challengeExpiresAt: challenge.expiresAt };
     }
 
+    // An authenticator app is the stronger factor, so it takes precedence over the emailed code.
+    if (env.LOGIN_OTP_ENABLED) return loginOtpService.start(user, origin);
+
     const session = await issueSession(user, client);
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
@@ -122,6 +127,27 @@ export const authService = {
       entityId: user.id,
       description: `${fullName(user)} signed in`,
     });
+    return session;
+  },
+
+  /** Second step of an emailed-code sign-in: the session is issued only here. */
+  async verifyLoginOtp(verificationId: string, otp: string, client: ClientInfo): Promise<IssuedSession> {
+    const userId = await loginOtpService.verify(verificationId, otp, client);
+    const user = await prisma.user.findFirst({
+      where: { id: userId, deletedAt: null },
+      select: { id: true, status: true, tokenVersion: true, firstName: true, lastName: true },
+    });
+    // Deactivated or deleted while the code was in flight.
+    if (!user || user.status !== 'ACTIVE') {
+      throw new UnauthorizedError('This sign-in attempt is no longer valid. Please sign in again.', 'LOGIN_OTP_SESSION_INVALID');
+    }
+
+    const session = await issueSession(user, client);
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+    void activityService.record(
+      { actorId: user.id, ...client },
+      { action: 'auth.login', entity: 'auth', entityId: user.id, description: `${fullName(user)} signed in`, metadata: { loginOtp: true } },
+    );
     return session;
   },
 

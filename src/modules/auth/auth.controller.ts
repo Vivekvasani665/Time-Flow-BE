@@ -6,13 +6,16 @@ import { tokenService } from './token.service';
 import {
   disableTwoFactorSchema,
   loginSchema,
+  resendLoginOtpSchema,
   registerSchema,
   twoFactorCodeSchema,
   twoFactorLoginSchema,
   updatePreferencesSchema,
+  verifyLoginOtpSchema,
 } from './auth.schemas';
 import { authService } from './auth.service';
 import { twoFactorService } from './two-factor.service';
+import { loginOtpService } from './login-otp.service';
 
 const clientInfo = (req: Request) => ({ ip: req.ip ?? null, userAgent: req.get('user-agent')?.slice(0, 255) ?? null });
 
@@ -20,6 +23,10 @@ export const authController = {
   async login(req: Request, res: Response) {
     const input = loginSchema.parse(req.body);
     const result = await authService.login(input, clientInfo(req));
+    if ('requiresOtp' in result) {
+      // No cookies yet — nothing authenticates until the emailed code is verified.
+      return ok(res, result, 'OTP sent to your registered email');
+    }
     if ('twoFactorRequired' in result) {
       // No cookies yet — the client posts the challenge back with a code.
       return ok(res, result, 'Enter the code from your authenticator app');
@@ -27,7 +34,21 @@ export const authController = {
     tokenService.setAuthCookies(res, result.accessToken, result.refreshToken, result.refreshExpiresAt);
     const user = await authService.getAuthUser(result.userId);
     // The access token is also returned for non-browser clients (Swagger, scripts).
-    return ok(res, { twoFactorRequired: false, user, accessToken: result.accessToken }, 'Signed in successfully');
+    return ok(res, { twoFactorRequired: false, requiresOtp: false, user, accessToken: result.accessToken }, 'Signed in successfully');
+  },
+
+  async verifyLoginOtp(req: Request, res: Response) {
+    const { verificationId, otp } = verifyLoginOtpSchema.parse(req.body);
+    const session = await authService.verifyLoginOtp(verificationId, otp, clientInfo(req));
+    tokenService.setAuthCookies(res, session.accessToken, session.refreshToken, session.refreshExpiresAt);
+    const user = await authService.getAuthUser(session.userId);
+    // Same shape as a password-only sign-in, so the client handles both alike.
+    return ok(res, { user, accessToken: session.accessToken }, 'Signed in successfully');
+  },
+
+  async resendLoginOtp(req: Request, res: Response) {
+    const { verificationId } = resendLoginOtpSchema.parse(req.body);
+    return ok(res, await loginOtpService.resend(verificationId, clientInfo(req)), 'A new code has been sent to your email');
   },
 
   async loginTwoFactor(req: Request, res: Response) {
