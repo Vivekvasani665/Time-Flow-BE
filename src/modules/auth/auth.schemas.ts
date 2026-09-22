@@ -10,6 +10,25 @@ export const loginSchema = z
 
 export type LoginInput = z.infer<typeof loginSchema>;
 
+/** A 6-digit authenticator code or a `xxxxx-xxxxx` recovery code. */
+const twoFactorCode = z.string({ message: 'Code is required' }).trim().min(6, 'Code is required').max(32);
+
+export const twoFactorLoginSchema = z
+  .object({
+    challengeToken: z.string({ message: 'Challenge token is required' }).min(1, 'Challenge token is required').max(2048),
+    code: twoFactorCode,
+  })
+  .strict();
+
+export const twoFactorCodeSchema = z.object({ code: twoFactorCode }).strict();
+
+export const disableTwoFactorSchema = z
+  .object({
+    password: z.string({ message: 'Password is required' }).min(1, 'Password is required').max(128),
+    code: twoFactorCode,
+  })
+  .strict();
+
 /** Public self-registration. Role and status are never client-controlled. */
 export const registerSchema = z
   .object({

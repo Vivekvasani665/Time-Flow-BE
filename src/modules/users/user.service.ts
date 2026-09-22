@@ -7,6 +7,7 @@ import { fullName, type RequestContext } from '../../common/utils/request-contex
 import { activityService } from '../activity-logs/activity.service';
 import { rbacService } from '../permissions/rbac.service';
 import { hashPassword } from '../auth/auth.service';
+import { twoFactorService } from '../auth/two-factor.service';
 import { userRepository, userSelect } from './user.repository';
 import type { CreateUserInput, ListUsersQuery, UpdateUserInput } from './user.schemas';
 import { userRefSelect } from '../../common/http/selects';
@@ -169,6 +170,22 @@ export const userService = {
       });
     }
     return user;
+  },
+
+  /** For a user locked out of both their authenticator and their recovery codes. */
+  async resetTwoFactor(ctx: RequestContext, id: string) {
+    const target = await loadTarget(id);
+    await assertCanManageUser(ctx, target);
+    if (!target.twoFactorEnabled) throw new BadRequestError('Two-factor authentication is not enabled for this user', 'TWO_FACTOR_NOT_ENABLED');
+
+    await twoFactorService.clear(id);
+    void activityService.record(ctx, {
+      action: 'user.2fa_reset',
+      entity: 'user',
+      entityId: id,
+      description: `${fullName(ctx.actor)} reset two-factor authentication for ${fullName(target)}`,
+      notify: [{ userId: id, type: 'user.2fa_reset', title: 'Your two-factor authentication was reset by an administrator', link: '/profile' }],
+    });
   },
 
   async remove(ctx: RequestContext, id: string) {

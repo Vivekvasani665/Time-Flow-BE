@@ -12,6 +12,7 @@ import { withDefaults, type Preferences } from './auth.schemas';
 import { cache } from '../../cache/cache.service';
 import { producers } from '../../queue/producers';
 import { tokenService } from './token.service';
+import { twoFactorService } from './two-factor.service';
 import type { LoginInput, RegisterInput } from './auth.schemas';
 
 /** Role given to everyone who signs up themselves; admins can promote them later. */
@@ -33,6 +34,16 @@ export type IssuedSession = {
   refreshExpiresAt: Date;
   userId: string;
 };
+
+/** Password was right, but the account has 2FA: no session until a code is supplied. */
+export type TwoFactorChallenge = {
+  twoFactorRequired: true;
+  challengeToken: string;
+  challengeExpiresAt: Date;
+};
+
+const CHALLENGE_INVALID = () =>
+  new UnauthorizedError('Your sign-in attempt has expired. Please sign in again.', 'TWO_FACTOR_CHALLENGE_INVALID');
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, BCRYPT_COST);
@@ -65,10 +76,18 @@ async function issueSession(
 }
 
 export const authService = {
-  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession> {
+  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge> {
     const user = await prisma.user.findFirst({
       where: { email: input.email, deletedAt: null },
-      select: { id: true, passwordHash: true, status: true, tokenVersion: true, firstName: true, lastName: true },
+      select: {
+        id: true,
+        passwordHash: true,
+        status: true,
+        tokenVersion: true,
+        firstName: true,
+        lastName: true,
+        twoFactorEnabled: true,
+      },
     });
 
     const passwordOk = await bcrypt.compare(input.password, user?.passwordHash ?? DUMMY_HASH);
@@ -88,6 +107,12 @@ export const authService = {
       throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
     }
 
+    if (user.twoFactorEnabled) {
+      // tv is carried so a password change mid-challenge voids the challenge.
+      const challenge = tokenService.signTwoFactorChallenge({ sub: user.id, tv: user.tokenVersion });
+      return { twoFactorRequired: true, challengeToken: challenge.token, challengeExpiresAt: challenge.expiresAt };
+    }
+
     const session = await issueSession(user, client);
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
@@ -98,6 +123,53 @@ export const authService = {
       description: `${fullName(user)} signed in`,
     });
     return session;
+  },
+
+  /** Second step of a 2FA sign-in: exchanges the challenge + a code for a session. */
+  async verifyTwoFactorLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { method: 'totp' | 'recovery' }> {
+    const challenge = tokenService.verifyTwoFactorChallenge(challengeToken);
+    if (!challenge) throw CHALLENGE_INVALID();
+
+    const user = await prisma.user.findFirst({
+      where: { id: challenge.sub, deletedAt: null },
+      select: {
+        id: true,
+        status: true,
+        tokenVersion: true,
+        firstName: true,
+        lastName: true,
+        twoFactorEnabled: true,
+        twoFactorSecret: true,
+      },
+    });
+    if (!user || user.tokenVersion !== challenge.tv || !user.twoFactorEnabled) throw CHALLENGE_INVALID();
+    if (user.status !== 'ACTIVE') {
+      throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
+    }
+
+    const origin: ActivityOrigin = { actorId: user.id, ...client };
+    const method = await twoFactorService.verifyCode(user, code);
+    if (!method) {
+      void activityService.record(origin, {
+        action: 'auth.2fa_failed',
+        entity: 'auth',
+        entityId: user.id,
+        description: `Failed two-factor code for ${fullName(user)}`,
+      });
+      throw new UnauthorizedError('That code is not valid. Check your authenticator app and try again.', 'INVALID_TWO_FACTOR_CODE');
+    }
+
+    const session = await issueSession(user, client);
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+
+    void activityService.record(origin, {
+      action: 'auth.login',
+      entity: 'auth',
+      entityId: user.id,
+      description: method === 'recovery' ? `${fullName(user)} signed in with a recovery code` : `${fullName(user)} signed in`,
+      metadata: { twoFactor: method },
+    });
+    return { ...session, method };
   },
 
   /** Self-service sign-up: creates an active user with the default role and signs them in. */
@@ -217,6 +289,7 @@ export const authService = {
           lastLoginAt: true,
           createdAt: true,
           preferences: true,
+          twoFactorEnabled: true,
           role: { select: { id: true, name: true } },
           roleId: true,
         },

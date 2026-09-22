@@ -34,6 +34,12 @@ export const userController = {
     return created(res, user, 'User created successfully');
   },
 
+  async resetTwoFactor(req: Request, res: Response) {
+    const { id } = uuidParam.parse(req.params);
+    await userService.resetTwoFactor(getRequestContext(req), id);
+    return ok(res, null, 'Two-factor authentication reset');
+  },
+
   async update(req: Request, res: Response) {
     const { id } = uuidParam.parse(req.params);
     const input = updateUserSchema.parse(req.body);

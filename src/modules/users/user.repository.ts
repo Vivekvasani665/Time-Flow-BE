@@ -12,6 +12,7 @@ export const userSelect = {
   avatarUrl: true,
   status: true,
   lastLoginAt: true,
+  twoFactorEnabled: true,
   createdAt: true,
   updatedAt: true,
   role: { select: { id: true, name: true } },

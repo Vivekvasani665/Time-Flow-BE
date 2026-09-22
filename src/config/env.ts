@@ -29,6 +29,10 @@ const EnvSchema = z.object({
   ACCESS_TOKEN_TTL_MINUTES: z.coerce.number().int().positive().default(15),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(7),
   COOKIE_SECURE: bool.default(false),
+  /** Name shown next to the account in authenticator apps. */
+  TOTP_ISSUER: z.string().min(1).default('TimeFlow'),
+  /** How long a password-verified sign-in waits for its 2FA code. */
+  TWO_FACTOR_CHALLENGE_TTL_MINUTES: z.coerce.number().int().positive().default(5),
 
   CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(5),

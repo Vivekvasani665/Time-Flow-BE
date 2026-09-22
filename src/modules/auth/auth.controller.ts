@@ -3,19 +3,40 @@ import { created, ok } from '../../common/http/response';
 import { requireAuth } from '../../common/utils/request-context';
 import { uuidParam } from '../../common/utils/validation';
 import { tokenService } from './token.service';
-import { loginSchema, registerSchema, updatePreferencesSchema } from './auth.schemas';
+import {
+  disableTwoFactorSchema,
+  loginSchema,
+  registerSchema,
+  twoFactorCodeSchema,
+  twoFactorLoginSchema,
+  updatePreferencesSchema,
+} from './auth.schemas';
 import { authService } from './auth.service';
+import { twoFactorService } from './two-factor.service';
 
 const clientInfo = (req: Request) => ({ ip: req.ip ?? null, userAgent: req.get('user-agent')?.slice(0, 255) ?? null });
 
 export const authController = {
   async login(req: Request, res: Response) {
     const input = loginSchema.parse(req.body);
-    const session = await authService.login(input, clientInfo(req));
+    const result = await authService.login(input, clientInfo(req));
+    if ('twoFactorRequired' in result) {
+      // No cookies yet — the client posts the challenge back with a code.
+      return ok(res, result, 'Enter the code from your authenticator app');
+    }
+    tokenService.setAuthCookies(res, result.accessToken, result.refreshToken, result.refreshExpiresAt);
+    const user = await authService.getAuthUser(result.userId);
+    // The access token is also returned for non-browser clients (Swagger, scripts).
+    return ok(res, { twoFactorRequired: false, user, accessToken: result.accessToken }, 'Signed in successfully');
+  },
+
+  async loginTwoFactor(req: Request, res: Response) {
+    const { challengeToken, code } = twoFactorLoginSchema.parse(req.body);
+    const session = await authService.verifyTwoFactorLogin(challengeToken, code, clientInfo(req));
     tokenService.setAuthCookies(res, session.accessToken, session.refreshToken, session.refreshExpiresAt);
     const user = await authService.getAuthUser(session.userId);
-    // The access token is also returned for non-browser clients (Swagger, scripts).
-    return ok(res, { user, accessToken: session.accessToken }, 'Signed in successfully');
+    const recoveryCodesRemaining = session.method === 'recovery' ? (await twoFactorService.status(session.userId)).recoveryCodesRemaining : undefined;
+    return ok(res, { user, accessToken: session.accessToken, recoveryCodesRemaining }, 'Signed in successfully');
   },
 
   async register(req: Request, res: Response) {
@@ -70,6 +91,37 @@ export const authController = {
     const auth = requireAuth(req);
     const revoked = await authService.revokeOtherSessions(auth.id, tokenService.extractRefreshToken(req));
     return ok(res, { revoked }, revoked === 1 ? 'Signed out 1 other device' : `Signed out ${revoked} other devices`);
+  },
+
+  async twoFactorStatus(req: Request, res: Response) {
+    const auth = requireAuth(req);
+    return ok(res, await twoFactorService.status(auth.id));
+  },
+
+  async twoFactorSetup(req: Request, res: Response) {
+    const auth = requireAuth(req);
+    return ok(res, await twoFactorService.setup(auth.id), 'Scan the QR code with your authenticator app');
+  },
+
+  async twoFactorEnable(req: Request, res: Response) {
+    const auth = requireAuth(req);
+    const { code } = twoFactorCodeSchema.parse(req.body);
+    const result = await twoFactorService.enable(auth.id, code, { actorId: auth.id, ...clientInfo(req) });
+    return ok(res, result, 'Two-factor authentication enabled. Save your recovery codes somewhere safe.');
+  },
+
+  async twoFactorDisable(req: Request, res: Response) {
+    const auth = requireAuth(req);
+    const { password, code } = disableTwoFactorSchema.parse(req.body);
+    await twoFactorService.disable(auth.id, password, code, { actorId: auth.id, ...clientInfo(req) });
+    return ok(res, null, 'Two-factor authentication disabled');
+  },
+
+  async twoFactorRegenerateCodes(req: Request, res: Response) {
+    const auth = requireAuth(req);
+    const { code } = twoFactorCodeSchema.parse(req.body);
+    const result = await twoFactorService.regenerateRecoveryCodes(auth.id, code, { actorId: auth.id, ...clientInfo(req) });
+    return ok(res, result, 'New recovery codes generated. The old ones no longer work.');
   },
 
   async updatePreferences(req: Request, res: Response) {

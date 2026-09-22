@@ -13,5 +13,6 @@ userRouter.get('/', requirePermission(P['users.view']), userController.list);
 userRouter.post('/', requirePermission(P['users.create']), userController.create);
 userRouter.get('/:id', requirePermission(P['users.view']), userController.get);
 userRouter.patch('/:id', requirePermission(P['users.update']), userController.update);
+userRouter.post('/:id/2fa/reset', requirePermission(P['users.update']), userController.resetTwoFactor);
 userRouter.patch('/:id/status', requirePermission(P['users.update']), userController.updateStatus);
 userRouter.delete('/:id', requirePermission(P['users.delete']), userController.remove);

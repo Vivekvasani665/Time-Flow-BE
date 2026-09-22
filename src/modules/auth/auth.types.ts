@@ -27,3 +27,9 @@ export type VerifiedAccessToken = AccessTokenPayload & {
   /** expiry, seconds since epoch */
   exp: number;
 };
+
+/** Proves the password step of a 2FA sign-in; exchanged for a session with a TOTP code. */
+export type TwoFactorChallengePayload = {
+  sub: string;
+  tv: number;
+};

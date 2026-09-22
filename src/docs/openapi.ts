@@ -201,9 +201,22 @@ export const openApiDocument = {
           status: userStatus,
           role: ref('RoleRef'),
           permissions: arrayOf(str({ example: 'users.view' })),
+          twoFactorEnabled: bool,
           lastLoginAt: nullable(dateTime),
           createdAt: dateTime,
         },
+      },
+      TwoFactorChallenge: {
+        type: 'object',
+        properties: {
+          twoFactorRequired: { type: 'boolean', example: true },
+          challengeToken: str({ description: 'Post back to `/api/auth/login/2fa` with a code.' }),
+          challengeExpiresAt: dateTime,
+        },
+      },
+      RecoveryCodes: {
+        type: 'object',
+        properties: { recoveryCodes: arrayOf(str({ example: 'k7m2p-x9q4r' })) },
       },
       User: {
         allOf: [
@@ -214,6 +227,7 @@ export const openApiDocument = {
               phone: nullable(str()),
               status: userStatus,
               role: ref('RoleRef'),
+              twoFactorEnabled: bool,
               lastLoginAt: nullable(dateTime),
               createdAt: dateTime,
               updatedAt: dateTime,
@@ -503,18 +517,106 @@ export const openApiDocument = {
       post: {
         tags: ['Auth'],
         summary: 'Sign in',
-        description: 'Rate limited to 5 attempts per minute per IP. Sets `tf_access` and `tf_refresh` httpOnly cookies.',
+        description:
+          'Rate limited to 5 attempts per minute per IP. Sets `tf_access` and `tf_refresh` httpOnly cookies. ' +
+          'If the account has two-factor authentication, **no cookies are set**: the response is a `TwoFactorChallenge` ' +
+          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`.',
         requestBody: body({
           type: 'object',
           required: ['email', 'password'],
           properties: { email: str({ example: 'superadmin@timeflow.dev' }), password: str({ example: 'Password123!' }) },
         }),
         responses: {
-          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '200': success({
+            oneOf: [
+              { type: 'object', properties: { twoFactorRequired: { type: 'boolean', example: false }, user: ref('AuthUser'), accessToken: str() } },
+              ref('TwoFactorChallenge'),
+            ],
+          }),
           '401': errorResponse('Invalid credentials', 'INVALID_CREDENTIALS', 'Invalid email or password'),
           '403': errorResponse('Inactive account', 'ACCOUNT_INACTIVE', 'Your account is inactive. Contact an administrator.'),
           ...errors(400, 429),
         },
+      },
+    },
+    '/api/auth/login/2fa': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Complete a two-factor sign-in',
+        description:
+          'Exchanges the `challengeToken` from `/api/auth/login` plus a 6-digit authenticator code (or a single-use recovery code) ' +
+          'for a session. Sets the auth cookies. Codes are limited to 5 attempts per 5 minutes per user.',
+        requestBody: body({
+          type: 'object',
+          required: ['challengeToken', 'code'],
+          properties: { challengeToken: str(), code: str({ example: '123456' }) },
+        }),
+        responses: {
+          '200': success({
+            type: 'object',
+            properties: {
+              user: ref('AuthUser'),
+              accessToken: str(),
+              recoveryCodesRemaining: { ...int, description: 'Present only when a recovery code was used.' },
+            },
+          }),
+          '401': errorResponse('Wrong code or expired challenge', 'INVALID_TWO_FACTOR_CODE', 'That code is not valid. Check your authenticator app and try again.'),
+          ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/me/2fa': {
+      get: {
+        tags: ['Auth'],
+        summary: 'Two-factor status',
+        security: secured,
+        responses: {
+          '200': success({ type: 'object', properties: { enabled: bool, enabledAt: nullable(dateTime), recoveryCodesRemaining: int } }),
+          ...errors(401),
+        },
+      },
+    },
+    '/api/auth/me/2fa/setup': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Start two-factor setup',
+        description: 'Generates a new secret (pending until confirmed). Show `qrCodeDataUrl` as an `<img>`; `secret` is for manual entry.',
+        security: secured,
+        responses: {
+          '200': success({ type: 'object', properties: { secret: str(), otpauthUrl: str(), qrCodeDataUrl: str({ example: 'data:image/png;base64,...' }) } }),
+          '409': errorResponse('Already enabled', 'TWO_FACTOR_ALREADY_ENABLED', 'Two-factor authentication is already enabled'),
+          ...errors(401),
+        },
+      },
+    },
+    '/api/auth/me/2fa/enable': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Confirm setup and enable two-factor',
+        description: 'Verifies a code from the app against the pending secret. Returns 10 recovery codes — they are shown only once.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['code'], properties: { code: str({ example: '123456' }) } }),
+        responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 409, 429) },
+      },
+    },
+    '/api/auth/me/2fa/disable': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Disable two-factor',
+        description: 'Requires the account password and a current authenticator or recovery code.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password', 'code'], properties: { password: str(), code: str() } }),
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/recovery-codes': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Regenerate recovery codes',
+        description: 'Requires a current code. Replaces all recovery codes; the old ones stop working.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['code'], properties: { code: str() } }),
+        responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 429) },
       },
     },
     '/api/auth/register': {
@@ -576,6 +678,16 @@ export const openApiDocument = {
         parameters: [idParam],
         requestBody: body({ type: 'object', required: ['status'], properties: { status: userStatus } }),
         responses: { '200': success(ref('User')), ...errors(400, 401, 403, 404) },
+      },
+    },
+    '/api/users/{id}/2fa/reset': {
+      post: {
+        tags: ['Users'],
+        summary: 'Reset a user\'s two-factor authentication',
+        description: `${perm('users.update')} For users who lost both their authenticator and recovery codes. They can sign in with just a password afterwards.`,
+        security: secured,
+        parameters: [idParam],
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 403, 404) },
       },
     },
     '/api/users/options': {

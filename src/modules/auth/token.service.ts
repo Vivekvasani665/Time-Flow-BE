@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 import type { CookieOptions, Request, Response } from 'express';
 import { env } from '../../config/env';
 import { randomToken, sha256 } from '../../common/utils/crypto';
-import type { AccessTokenPayload, VerifiedAccessToken } from './auth.types';
+import type { AccessTokenPayload, TwoFactorChallengePayload, VerifiedAccessToken } from './auth.types';
 
 export const ACCESS_COOKIE = 'tf_access';
 export const REFRESH_COOKIE = 'tf_refresh';
@@ -23,6 +23,8 @@ export const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
 
 const JWT_ISSUER = 'timeflow-api';
 const JWT_AUDIENCE = 'timeflow';
+/** A distinct audience, so a challenge token can never pass as an access token (or vice versa). */
+const JWT_CHALLENGE_AUDIENCE = 'timeflow-2fa';
 
 export const tokenService = {
   signAccessToken(payload: AccessTokenPayload): string {
@@ -51,6 +53,32 @@ export const tokenService = {
         return null;
       }
       return { sub: decoded.sub, tv: decoded.tv, exp: decoded.exp };
+    } catch {
+      return null;
+    }
+  },
+
+  signTwoFactorChallenge(payload: TwoFactorChallengePayload): { token: string; expiresAt: Date } {
+    const ttlSeconds = env.TWO_FACTOR_CHALLENGE_TTL_MINUTES * 60;
+    const token = jwt.sign(payload, env.JWT_ACCESS_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: ttlSeconds,
+      issuer: JWT_ISSUER,
+      audience: JWT_CHALLENGE_AUDIENCE,
+    });
+    return { token, expiresAt: new Date(Date.now() + ttlSeconds * 1000) };
+  },
+
+  /** Returns the payload, or null for any invalid/expired challenge. */
+  verifyTwoFactorChallenge(token: string): TwoFactorChallengePayload | null {
+    try {
+      const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
+        algorithms: ['HS256'],
+        issuer: JWT_ISSUER,
+        audience: JWT_CHALLENGE_AUDIENCE,
+      });
+      if (typeof decoded === 'string' || typeof decoded.sub !== 'string' || typeof decoded.tv !== 'number') return null;
+      return { sub: decoded.sub, tv: decoded.tv };
     } catch {
       return null;
     }

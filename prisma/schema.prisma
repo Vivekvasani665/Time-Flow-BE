@@ -70,21 +70,32 @@ model User {
   /// UI preferences (theme, density). A bag rather than columns so new
   /// settings need no migration; the server validates the shape on write.
   preferences  Json       @default("{}")
-  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
-  deletedAt    DateTime?  @map("deleted_at") @db.Timestamptz(3)
 
-  role            Role            @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  managedProjects Project[]       @relation("ProjectManager")
-  createdProjects Project[]       @relation("ProjectCreator")
+  /// TOTP two-factor authentication. Secrets are AES-256-GCM encrypted
+  /// (see encryptSecret); the pending secret holds an unconfirmed setup.
+  twoFactorEnabled       Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorSecret        String?   @map("two_factor_secret")
+  twoFactorPendingSecret String?   @map("two_factor_pending_secret")
+  twoFactorEnabledAt     DateTime? @map("two_factor_enabled_at") @db.Timestamptz(3)
+  /// Last accepted 30-second TOTP step; a code is never accepted twice.
+  twoFactorLastStep      Int?      @map("two_factor_last_step")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  role            Role                    @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  managedProjects Project[]               @relation("ProjectManager")
+  createdProjects Project[]               @relation("ProjectCreator")
   memberships     ProjectMember[]
-  assignedTasks   Task[]          @relation("TaskAssignee")
-  createdTasks    Task[]          @relation("TaskCreator")
+  assignedTasks   Task[]                  @relation("TaskAssignee")
+  createdTasks    Task[]                  @relation("TaskCreator")
   activityLogs    ActivityLog[]
   notifications   Notification[]
   refreshTokens   RefreshToken[]
-  emailsReceived  EmailLog[]      @relation("EmailsReceived")
-  emailsSent      EmailLog[]      @relation("EmailsSent")
+  recoveryCodes   TwoFactorRecoveryCode[]
+  emailsReceived  EmailLog[]              @relation("EmailsReceived")
+  emailsSent      EmailLog[]              @relation("EmailsSent")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -122,9 +133,9 @@ model Permission {
 }
 
 model RolePermission {
-  roleId       String     @map("role_id") @db.Uuid
-  permissionId String     @map("permission_id") @db.Uuid
-  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  roleId       String   @map("role_id") @db.Uuid
+  permissionId String   @map("permission_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
   permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
@@ -238,6 +249,21 @@ model Notification {
   @@map("notifications")
 }
 
+/// Single-use backup codes for when the authenticator app is unavailable.
+model TwoFactorRecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  /// SHA-256 of the normalised code; codes are high-entropy, so no bcrypt needed.
+  codeHash  String    @map("code_hash") @db.VarChar(64)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, codeHash])
+  @@map("two_factor_recovery_codes")
+}
+
 model RefreshToken {
   id         String    @id @default(uuid()) @db.Uuid
   userId     String    @map("user_id") @db.Uuid
@@ -264,46 +290,46 @@ model RefreshToken {
 /// Outbox-style record of every transactional email so queue behaviour
 /// (attempts, failures, retries) is observable from the database and UI.
 model EmailLog {
-  id          String      @id @default(uuid()) @db.Uuid
-  to          String      @db.VarChar(254)
-  fromAddress String      @map("from_address") @db.VarChar(254)
+  id              String         @id @default(uuid()) @db.Uuid
+  to              String         @db.VarChar(254)
+  fromAddress     String         @map("from_address") @db.VarChar(254)
   /// Display name of an inbound sender; outbound mail carries it in fromAddress.
-  fromName    String?     @map("from_name") @db.VarChar(120)
-  subject     String      @db.VarChar(200)
-  template    String      @db.VarChar(60)
-  direction   EmailDirection @default(OUTBOUND)
+  fromName        String?        @map("from_name") @db.VarChar(120)
+  subject         String         @db.VarChar(200)
+  template        String         @db.VarChar(60)
+  direction       EmailDirection @default(OUTBOUND)
   /// RFC 5322 Message-ID. Set on outbound mail when it is handed to SMTP, and
   /// on inbound mail from its header, so replies can be matched to a thread.
-  messageId   String?     @unique @map("message_id") @db.VarChar(512)
+  messageId       String?        @unique @map("message_id") @db.VarChar(512)
   /// The Message-ID this message answers, as the sender's client reported it.
-  inReplyTo   String?     @map("in_reply_to") @db.VarChar(512)
+  inReplyTo       String?        @map("in_reply_to") @db.VarChar(512)
   /// Rendered at enqueue time so the message is readable while QUEUED or FAILED,
   /// not only once delivery succeeds.
-  bodyHtml    String?     @map("body_html")
-  bodyText    String?     @map("body_text")
+  bodyHtml        String?        @map("body_html")
+  bodyText        String?        @map("body_text")
   /// Recipient — owns this message in their Inbox.
-  toUserId    String?     @map("to_user_id") @db.Uuid
+  toUserId        String?        @map("to_user_id") @db.Uuid
   /// Whoever triggered the send — owns this message in their Sent folder.
-  fromUserId  String?     @map("from_user_id") @db.Uuid
-  readAt      DateTime?   @map("read_at") @db.Timestamptz(3)
+  fromUserId      String?        @map("from_user_id") @db.Uuid
+  readAt          DateTime?      @map("read_at") @db.Timestamptz(3)
   /// Threading: set when this message was composed as a reply to another.
-  replyToId   String?     @map("reply_to_id") @db.Uuid
+  replyToId       String?        @map("reply_to_id") @db.Uuid
   /// Per-side soft delete. One row is both parties' copy of the message, so
   /// each side hides it from their own folder without touching the other's.
-  deletedByToAt   DateTime? @map("deleted_by_to_at") @db.Timestamptz(3)
-  deletedByFromAt DateTime? @map("deleted_by_from_at") @db.Timestamptz(3)
-  status      EmailStatus @default(QUEUED)
-  attempts    Int         @default(0)
-  lastError   String?     @map("last_error") @db.VarChar(1000)
+  deletedByToAt   DateTime?      @map("deleted_by_to_at") @db.Timestamptz(3)
+  deletedByFromAt DateTime?      @map("deleted_by_from_at") @db.Timestamptz(3)
+  status          EmailStatus    @default(QUEUED)
+  attempts        Int            @default(0)
+  lastError       String?        @map("last_error") @db.VarChar(1000)
   /// BullMQ job id. Composite ids (template + entity + recipient) run well past
   /// 64 characters, so this is sized for them rather than for a bare UUID.
-  jobId       String?     @map("job_id") @db.VarChar(255)
-  sentAt      DateTime?   @map("sent_at") @db.Timestamptz(3)
-  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  jobId           String?        @map("job_id") @db.VarChar(255)
+  sentAt          DateTime?      @map("sent_at") @db.Timestamptz(3)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  toUser   User? @relation("EmailsReceived", fields: [toUserId], references: [id], onDelete: SetNull)
-  fromUser User? @relation("EmailsSent", fields: [fromUserId], references: [id], onDelete: SetNull)
+  toUser   User?      @relation("EmailsReceived", fields: [toUserId], references: [id], onDelete: SetNull)
+  fromUser User?      @relation("EmailsSent", fields: [fromUserId], references: [id], onDelete: SetNull)
   replyTo  EmailLog?  @relation("EmailThread", fields: [replyToId], references: [id], onDelete: SetNull)
   replies  EmailLog[] @relation("EmailThread")
 
@@ -320,20 +346,20 @@ model EmailLog {
 /// configured in the UI instead of by editing .env on the server. The password
 /// is stored encrypted (AES-256-GCM) and never leaves the backend.
 model MailSettings {
-  id            Int       @id @default(1)
-  host          String    @db.VarChar(255)
-  port          Int
-  secure        Boolean   @default(false)
-  username      String    @db.VarChar(254)
+  id             Int       @id @default(1)
+  host           String    @db.VarChar(255)
+  port           Int
+  secure         Boolean   @default(false)
+  username       String    @db.VarChar(254)
   /// AES-256-GCM payload — never the raw password.
-  passwordEnc   String    @map("password_enc")
-  fromAddress   String    @map("from_address") @db.VarChar(254)
-  fromName      String    @default("TimeFlow") @map("from_name") @db.VarChar(80)
+  passwordEnc    String    @map("password_enc")
+  fromAddress    String    @map("from_address") @db.VarChar(254)
+  fromName       String    @default("TimeFlow") @map("from_name") @db.VarChar(80)
   /// Set false to fall back to the SMTP_* environment variables.
-  enabled       Boolean   @default(true)
+  enabled        Boolean   @default(true)
   lastVerifiedAt DateTime? @map("last_verified_at") @db.Timestamptz(3)
-  updatedById   String?   @map("updated_by_id") @db.Uuid
-  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedById    String?   @map("updated_by_id") @db.Uuid
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("mail_settings")
 }
