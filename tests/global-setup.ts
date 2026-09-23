@@ -16,7 +16,7 @@ export default async function globalSetup() {
   execSync('npx prisma migrate deploy', { env, stdio: 'pipe' });
   const tables = [
     'role_permissions', 'project_members', 'notifications', 'activity_logs', 'refresh_tokens',
-    'email_logs', 'tasks', 'projects', 'users', 'roles', 'permissions',
+    'email_logs', 'tasks', 'projects', 'users', 'roles', 'permissions', 'two_factor_recovery_codes', 'login_otps',
   ].map((t) => `"${t}"`).join(', ');
   execSync(`npx prisma db execute --stdin --schema prisma/schema.prisma`, { env, input: `TRUNCATE ${tables} CASCADE;`, stdio: ['pipe', 'pipe', 'pipe'] });
   execSync('npx tsx prisma/seed.ts', { env, stdio: 'pipe' });
