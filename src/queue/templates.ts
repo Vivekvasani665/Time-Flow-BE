@@ -204,7 +204,7 @@ export function renderLoginOtpEmail(to: string, vars: { firstName: string; code:
   const l: Layout = {
     kicker: 'Sign-in verification',
     heading: 'Your verification code',
-    intro: `Hi ${vars.firstName || 'there'}, use this code to finish signing in to TimeFlow.`,
+    intro: `Hi ${vars.firstName || 'there'}, use this code to finish signing in to TimeFlow. It replaces any code from an earlier email.`,
     code: vars.code,
     rows: [{ label: 'Expires in', value: `${vars.minutes} minutes` }],
     footer:
@@ -212,7 +212,11 @@ export function renderLoginOtpEmail(to: string, vars: { firstName: string; code:
   };
   return {
     to,
-    subject: 'Your Time-Flow Login Verification Code',
+    // The code leads the subject so the newest one is readable from the inbox
+    // list. It also makes every subject unique, which stops Gmail collapsing a
+    // run of sign-in attempts into one thread where an older, dead code is the
+    // first thing you see.
+    subject: `${vars.code} is your TimeFlow sign-in code`,
     html: layout(l),
     text: [plain({ ...l, salutation: `Hi ${vars.firstName || 'there'},` }), l.footer].join('\n\n'),
   };
