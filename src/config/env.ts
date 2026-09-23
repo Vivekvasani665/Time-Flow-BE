@@ -33,6 +33,15 @@ const EnvSchema = z.object({
   TOTP_ISSUER: z.string().min(1).default('TimeFlow'),
   /** How long a password-verified sign-in waits for its 2FA code. */
   TWO_FACTOR_CHALLENGE_TTL_MINUTES: z.coerce.number().int().positive().default(5),
+  /**
+   * Emails a 6-digit code after a correct password, and issues the session
+   * only once it is entered. Off by default: it needs working outgoing mail,
+   * or nobody can sign in. Accounts with an authenticator app use that instead.
+   */
+  LOGIN_OTP_ENABLED: bool.default(false),
+  LOGIN_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+  LOGIN_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(60),
+
   /** How long an administrator-issued password reset link stays usable. Links go to APP_URL/reset-password. */
   RESET_PASSWORD_TOKEN_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
 
@@ -120,6 +129,9 @@ export function productionWarnings(): string[] {
   if (/dev-only|replace-with|change-me/i.test(env.JWT_ACCESS_SECRET)) warnings.push('JWT_ACCESS_SECRET is a placeholder — generate one with `openssl rand -base64 48`.');
   if (local.test(env.APP_URL)) warnings.push(`APP_URL is ${env.APP_URL} — links in emails will point at localhost.`);
   if (env.CORS_ORIGINS.some((o) => local.test(o))) warnings.push('CORS_ORIGINS still allows a localhost origin.');
+  if (env.LOGIN_OTP_ENABLED && (env.EMAIL_PROVIDER ?? (env.SMTP_HOST ? 'smtp' : 'log')) === 'log') {
+    warnings.push('LOGIN_OTP_ENABLED is true but no mail provider is configured — sign-in codes cannot be delivered, so nobody can sign in unless a mail account is set up in System → Email delivery.');
+  }
   if (env.EMAIL_FAILURE_RATE > 0) warnings.push(`EMAIL_FAILURE_RATE is ${env.EMAIL_FAILURE_RATE} — real emails will be failed on purpose.`);
   return warnings;
 }

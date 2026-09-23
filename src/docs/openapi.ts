@@ -215,6 +215,18 @@ export const openApiDocument = {
           challengeExpiresAt: dateTime,
         },
       },
+      LoginOtpChallenge: {
+        type: 'object',
+        properties: {
+          requiresOtp: { type: 'boolean', example: true },
+          verificationId: uuid,
+          email: str({ example: 'v****@gmail.com', description: 'Where the code was sent, masked.' }),
+          expiresAt: dateTime,
+          resendAvailableAt: dateTime,
+          expiresInSeconds: { ...int, example: 300 },
+          resendAvailableInSeconds: { ...int, example: 60 },
+        },
+      },
       PasswordResetRequest: {
         type: 'object',
         description: 'Status only. The token, its hash and the password are never returned.',
@@ -535,7 +547,9 @@ export const openApiDocument = {
         description:
           'Rate limited to 5 attempts per minute per IP. Sets `tf_access` and `tf_refresh` httpOnly cookies. ' +
           'If the account has two-factor authentication, **no cookies are set**: the response is a `TwoFactorChallenge` ' +
-          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`.',
+          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`. ' +
+          'Otherwise, when `LOGIN_OTP_ENABLED` is on, a 6-digit code is emailed and the response is a `LoginOtpChallenge` ' +
+          '(`requiresOtp: true`) to complete via `POST /api/auth/verify-login-otp`. The code itself is never returned.',
         requestBody: body({
           type: 'object',
           required: ['email', 'password'],
@@ -546,6 +560,7 @@ export const openApiDocument = {
             oneOf: [
               { type: 'object', properties: { twoFactorRequired: { type: 'boolean', example: false }, user: ref('AuthUser'), accessToken: str() } },
               ref('TwoFactorChallenge'),
+              ref('LoginOtpChallenge'),
             ],
           }),
           '401': errorResponse('Invalid credentials', 'INVALID_CREDENTIALS', 'Invalid email or password'),
@@ -577,6 +592,43 @@ export const openApiDocument = {
           }),
           '401': errorResponse('Wrong code or expired challenge', 'INVALID_TWO_FACTOR_CODE', 'That code is not valid. Check your authenticator app and try again.'),
           ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/verify-login-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Complete an emailed-code sign-in',
+        description:
+          'Exchanges the `verificationId` from `/api/auth/login` and the emailed 6-digit code for a session, setting the auth cookies. ' +
+          'A code is single-use, expires after 5 minutes and stops working after 5 wrong attempts. Rate limited to 10 requests per minute per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['verificationId', 'otp'],
+          properties: { verificationId: uuid, otp: str({ example: '123456' }) },
+        }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '401': errorResponse('Wrong, expired or spent code', 'LOGIN_OTP_INVALID', 'Incorrect code. 4 attempts left.'),
+          '429': errorResponse('Code locked after 5 wrong attempts', 'LOGIN_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
+          ...errors(400),
+        },
+      },
+    },
+    '/api/auth/resend-login-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Email a new sign-in code',
+        description:
+          'Replaces the code for this sign-in attempt; the previous one stops working. One resend per 60 seconds, ' +
+          'at most 5 codes per sign-in attempt, and 5 requests per 5 minutes per IP.',
+        requestBody: body({ type: 'object', required: ['verificationId'], properties: { verificationId: uuid } }),
+        responses: {
+          '200': success(ref('LoginOtpChallenge')),
+          '401': errorResponse('Attempt no longer valid', 'LOGIN_OTP_SESSION_INVALID', 'This sign-in attempt is no longer valid. Please sign in again.'),
+          '429': errorResponse('Cooldown', 'LOGIN_OTP_RESEND_COOLDOWN', 'Please wait 42 seconds before requesting a new code.'),
+          '503': errorResponse('Email could not be sent', 'EMAIL_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
+          ...errors(400),
         },
       },
     },
