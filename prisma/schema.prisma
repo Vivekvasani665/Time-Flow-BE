@@ -94,9 +94,10 @@ model User {
   notifications   Notification[]
   refreshTokens   RefreshToken[]
   recoveryCodes   TwoFactorRecoveryCode[]
-  loginOtps       LoginOtp[]
   emailsReceived  EmailLog[]              @relation("EmailsReceived")
   emailsSent      EmailLog[]              @relation("EmailsSent")
+  passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
+  requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -265,28 +266,33 @@ model TwoFactorRecoveryCode {
   @@map("two_factor_recovery_codes")
 }
 
-/// Emailed one-time code that must follow the password when LOGIN_OTP_ENABLED
-/// is on. One row per sign-in attempt: its id is the `verificationId` the
-/// client holds, and a resend rotates the code on the same row.
-model LoginOtp {
-  id         String    @id @default(uuid()) @db.Uuid
-  userId     String    @map("user_id") @db.Uuid
-  /// HMAC-SHA256 of the code, keyed by a server secret. A plain hash of a
-  /// 6-digit number could be reversed by trying all million values.
-  otpHash    String    @map("otp_hash") @db.VarChar(64)
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
-  /// Wrong guesses against the current code; reset when a new code is sent.
-  attempts   Int       @default(0)
-  sendCount  Int       @default(1) @map("send_count")
-  lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
-  usedAt     DateTime? @map("used_at") @db.Timestamptz(3)
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+enum PasswordResetStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+/// An administrator-issued password reset link. Only a SHA-256 of the token is
+/// stored; the raw token exists only in the emailed link. At most one PENDING
+/// row per user — issuing a new link cancels the previous one.
+model PasswordResetRequest {
+  id            String              @id @default(uuid()) @db.Uuid
+  userId        String              @map("user_id") @db.Uuid
+  requestedById String?             @map("requested_by_id") @db.Uuid
+  tokenHash     String              @unique @map("token_hash") @db.VarChar(64)
+  status        PasswordResetStatus @default(PENDING)
+  expiresAt     DateTime            @map("expires_at") @db.Timestamptz(3)
+  completedAt   DateTime?           @map("completed_at") @db.Timestamptz(3)
+  cancelledAt   DateTime?           @map("cancelled_at") @db.Timestamptz(3)
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  @@index([userId])
-  @@index([expiresAt])
-  @@map("login_otps")
+  user        User  @relation("PasswordResetTarget", fields: [userId], references: [id], onDelete: Cascade)
+  requestedBy User? @relation("PasswordResetRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("password_reset_requests")
 }
 
 model RefreshToken {

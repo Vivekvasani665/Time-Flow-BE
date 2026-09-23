@@ -144,6 +144,7 @@ export const openApiDocument = {
   tags: [
     { name: 'Auth' },
     { name: 'Users' },
+    { name: 'Password Resets' },
     { name: 'Roles' },
     { name: 'Projects' },
     { name: 'Tasks' },
@@ -214,16 +215,18 @@ export const openApiDocument = {
           challengeExpiresAt: dateTime,
         },
       },
-      LoginOtpChallenge: {
+      PasswordResetRequest: {
         type: 'object',
+        description: 'Status only. The token, its hash and the password are never returned.',
         properties: {
-          requiresOtp: { type: 'boolean', example: true },
-          verificationId: uuid,
-          email: str({ example: 'v****@gmail.com', description: 'Where the code was sent, masked.' }),
+          id: uuid,
+          userId: uuid,
+          status: { type: 'string', enum: ['PENDING', 'COMPLETED', 'EXPIRED', 'CANCELLED'] },
+          createdAt: dateTime,
           expiresAt: dateTime,
-          resendAvailableAt: dateTime,
-          expiresInSeconds: { ...int, example: 300 },
-          resendAvailableInSeconds: { ...int, example: 60 },
+          completedAt: nullable(dateTime),
+          cancelledAt: nullable(dateTime),
+          requestedBy: nullable(ref('UserRef')),
         },
       },
       RecoveryCodes: {
@@ -532,9 +535,7 @@ export const openApiDocument = {
         description:
           'Rate limited to 5 attempts per minute per IP. Sets `tf_access` and `tf_refresh` httpOnly cookies. ' +
           'If the account has two-factor authentication, **no cookies are set**: the response is a `TwoFactorChallenge` ' +
-          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`. ' +
-          'Otherwise, when `LOGIN_OTP_ENABLED` is on, a 6-digit code is emailed and the response is a `LoginOtpChallenge` ' +
-          '(`requiresOtp: true`) to complete via `POST /api/auth/verify-login-otp`. The code itself is never returned.',
+          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`.',
         requestBody: body({
           type: 'object',
           required: ['email', 'password'],
@@ -545,7 +546,6 @@ export const openApiDocument = {
             oneOf: [
               { type: 'object', properties: { twoFactorRequired: { type: 'boolean', example: false }, user: ref('AuthUser'), accessToken: str() } },
               ref('TwoFactorChallenge'),
-              ref('LoginOtpChallenge'),
             ],
           }),
           '401': errorResponse('Invalid credentials', 'INVALID_CREDENTIALS', 'Invalid email or password'),
@@ -577,43 +577,6 @@ export const openApiDocument = {
           }),
           '401': errorResponse('Wrong code or expired challenge', 'INVALID_TWO_FACTOR_CODE', 'That code is not valid. Check your authenticator app and try again.'),
           ...errors(400, 429),
-        },
-      },
-    },
-    '/api/auth/verify-login-otp': {
-      post: {
-        tags: ['Auth'],
-        summary: 'Complete an emailed-code sign-in',
-        description:
-          'Exchanges the `verificationId` from `/api/auth/login` and the emailed 6-digit code for a session, setting the auth cookies. ' +
-          'A code is single-use, expires after 5 minutes and stops working after 5 wrong attempts. Rate limited to 10 requests per minute per IP.',
-        requestBody: body({
-          type: 'object',
-          required: ['verificationId', 'otp'],
-          properties: { verificationId: uuid, otp: str({ example: '123456' }) },
-        }),
-        responses: {
-          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
-          '401': errorResponse('Wrong, expired or spent code', 'LOGIN_OTP_INVALID', 'Incorrect code. 4 attempts left.'),
-          '429': errorResponse('Code locked after 5 wrong attempts', 'LOGIN_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
-          ...errors(400),
-        },
-      },
-    },
-    '/api/auth/resend-login-otp': {
-      post: {
-        tags: ['Auth'],
-        summary: 'Email a new sign-in code',
-        description:
-          'Replaces the code for this sign-in attempt; the previous one stops working. One resend per 60 seconds, ' +
-          'at most 5 codes per sign-in attempt, and 5 requests per 5 minutes per IP.',
-        requestBody: body({ type: 'object', required: ['verificationId'], properties: { verificationId: uuid } }),
-        responses: {
-          '200': success(ref('LoginOtpChallenge')),
-          '401': errorResponse('Attempt no longer valid', 'LOGIN_OTP_SESSION_INVALID', 'This sign-in attempt is no longer valid. Please sign in again.'),
-          '429': errorResponse('Cooldown', 'LOGIN_OTP_RESEND_COOLDOWN', 'Please wait 42 seconds before requesting a new code.'),
-          '503': errorResponse('Email could not be sent', 'EMAIL_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
-          ...errors(400),
         },
       },
     },
@@ -740,6 +703,75 @@ export const openApiDocument = {
         security: secured,
         parameters: [idParam],
         responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 403, 404) },
+      },
+    },
+    '/api/admin/users/{userId}/password-reset': {
+      post: {
+        tags: ['Password Resets'],
+        summary: 'Email a password reset link to a member',
+        description:
+          '**Super Admin only** (by role, not permission). Cancels any link still pending for the member, issues a new single-use link ' +
+          'valid for `RESET_PASSWORD_TOKEN_EXPIRY_MINUTES` (default 30) and emails it. Rate limited to 10 per 10 minutes per admin.',
+        security: secured,
+        parameters: [{ name: 'userId', in: 'path', required: true, schema: uuid }],
+        responses: {
+          '200': success(ref('PasswordResetRequest')),
+          '400': errorResponse('Inactive user', 'USER_INACTIVE', 'This user is inactive. Activate the account before sending a password reset link.'),
+          '503': errorResponse('Email could not be sent', 'EMAIL_DELIVERY_FAILED', 'Unable to send password reset email.'),
+          ...errors(401, 403, 404, 429),
+        },
+      },
+      get: {
+        tags: ['Password Resets'],
+        summary: "A member's latest password reset request",
+        description: '**Super Admin only.** `data` is null when no reset was ever requested. A lapsed PENDING link is reported as EXPIRED.',
+        security: secured,
+        parameters: [{ name: 'userId', in: 'path', required: true, schema: uuid }],
+        responses: { '200': success(nullable(ref('PasswordResetRequest'))), ...errors(401, 403, 404) },
+      },
+    },
+    '/api/admin/password-reset-requests': {
+      get: {
+        tags: ['Password Resets'],
+        summary: 'Latest password reset request per member',
+        description: '**Super Admin only.** Members without a request are omitted.',
+        security: secured,
+        parameters: [q('userIds', str(), 'Comma-separated user ids (max 100).')],
+        responses: { '200': success(arrayOf(ref('PasswordResetRequest'))), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/auth/password-reset/verify': {
+      get: {
+        tags: ['Password Resets'],
+        summary: 'Check a password reset link',
+        description: 'Public. Rate limited to 30 per minute per IP.',
+        parameters: [{ name: 'token', in: 'query', required: true, schema: str() }],
+        responses: {
+          '200': success({ type: 'object', properties: { valid: { type: 'boolean', example: true }, expiresAt: dateTime } }),
+          '400': errorResponse('Unknown, used or cancelled link', 'PASSWORD_RESET_INVALID', 'This password reset link is invalid or expired.'),
+          '410': errorResponse('Link expired', 'PASSWORD_RESET_EXPIRED', 'This reset link has expired. Ask your administrator for a new one.'),
+          ...errors(429),
+        },
+      },
+    },
+    '/api/auth/password-reset': {
+      post: {
+        tags: ['Password Resets'],
+        summary: 'Set a new password with a reset link',
+        description:
+          'Public. The password needs 8+ characters with upper- and lowercase letters, a number and a special character. ' +
+          'Spends the link, and signs the member out everywhere. Rate limited to 10 per 15 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['token', 'newPassword', 'confirmPassword'],
+          properties: { token: str(), newPassword: str({ example: 'NewPassword123!' }), confirmPassword: str({ example: 'NewPassword123!' }) },
+        }),
+        responses: {
+          '200': success(nullable({ type: 'object' })),
+          '400': errorResponse('Invalid link or password', 'PASSWORD_RESET_INVALID', 'This password reset link is invalid or expired.'),
+          '410': errorResponse('Link expired', 'PASSWORD_RESET_EXPIRED', 'This reset link has expired. Ask your administrator for a new one.'),
+          ...errors(429),
+        },
       },
     },
     '/api/users/options': {

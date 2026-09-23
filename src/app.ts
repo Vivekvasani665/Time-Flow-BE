@@ -25,6 +25,7 @@ import { uploadRouter } from './modules/uploads/upload.routes';
 import { queueRouter } from './modules/queues/queue.routes';
 import { emailRouter } from './modules/emails/email.routes';
 import { mailSettingsRouter } from './modules/emails/mail-settings.routes';
+import { adminPasswordResetRouter, publicPasswordResetRouter } from './modules/password-resets/password-reset.routes';
 import { P } from './modules/permissions/permission-catalog';
 
 export type AppOptions = { enableBullBoard?: boolean };
@@ -69,7 +70,9 @@ export function createApp({ enableBullBoard = !isTest }: AppOptions = {}): Expre
   );
 
   app.use('/api', rateLimit({ name: 'api', limit: env.RATE_LIMIT_API_MAX, windowSeconds: env.RATE_LIMIT_API_WINDOW_SECONDS }));
+  app.use('/api/auth/password-reset', publicPasswordResetRouter);
   app.use('/api/auth', authRouter);
+  app.use('/api/admin', adminPasswordResetRouter);
   app.use('/api/users', userRouter);
   app.use('/api/roles', roleRouter);
   app.use('/api/permissions', permissionRouter);

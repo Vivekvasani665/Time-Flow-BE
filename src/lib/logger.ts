@@ -16,6 +16,11 @@ export const REDACT_PATHS = [
   'res.headers["set-cookie"]',
 ];
 
+/** Masks secret query parameters (e.g. a password reset `?token=`) in a URL before it is logged. */
+export function redactUrl(url: string | undefined): string | undefined {
+  return url?.replace(/([?&]token=)[^&#]*/gi, '$1[REDACTED]');
+}
+
 export const logger = pino({
   level: env.LOG_LEVEL,
   base: { service: process.env.SERVICE_NAME ?? 'timeflow-api' },

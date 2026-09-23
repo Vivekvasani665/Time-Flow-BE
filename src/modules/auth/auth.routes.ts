@@ -25,32 +25,12 @@ const twoFactorLoginLimiter = rateLimit({
   message: 'Too many code attempts. Please wait a minute and try again.',
 });
 
-// Per-IP guards on the emailed-code step. Guessing is capped per code as well
-// (5 wrong attempts), and resends by a per-attempt cooldown.
-const loginOtpVerifyLimiter = rateLimit({
-  name: 'login-otp-verify',
-  limit: 10,
-  windowSeconds: 60,
-  message: 'Too many code attempts. Please wait a minute and try again.',
-});
-
-const loginOtpResendLimiter = rateLimit({
-  name: 'login-otp-resend',
-  limit: 5,
-  windowSeconds: 5 * 60,
-  message: 'Too many code requests. Please wait a few minutes and try again.',
-});
-
 const refreshLimiter = rateLimit({ name: 'refresh', limit: 30, windowSeconds: 60 });
 
 export const authRouter = Router();
 
 authRouter.post('/login', loginLimiter, authController.login);
 authRouter.post('/login/2fa', twoFactorLoginLimiter, authController.loginTwoFactor);
-authRouter.post('/verify-login-otp', loginOtpVerifyLimiter, authController.verifyLoginOtp);
-authRouter.post('/login/otp/verify', loginOtpVerifyLimiter, authController.verifyLoginOtp);
-authRouter.post('/resend-login-otp', loginOtpResendLimiter, authController.resendLoginOtp);
-authRouter.post('/login/otp/resend', loginOtpResendLimiter, authController.resendLoginOtp);
 authRouter.post('/register', registerLimiter, authController.register);
 authRouter.post('/refresh', refreshLimiter, authController.refresh);
 authRouter.post('/logout', authController.logout);
