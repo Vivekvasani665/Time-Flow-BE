@@ -23,7 +23,7 @@ npm install
 createdb timeflow      # database named in DATABASE_URL
 npx prisma generate
 npm run db:deploy      # apply migrations
-npm run db:seed        # demo data
+npm run db:seed        # permissions + roles (+ first admin from ADMIN_EMAIL)
 ```
 
 Configure `.env` — at minimum `DATABASE_URL`, `REDIS_URL` and `JWT_ACCESS_SECRET`
