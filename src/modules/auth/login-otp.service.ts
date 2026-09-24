@@ -6,7 +6,7 @@ import { AppError, UnauthorizedError } from '../../common/errors';
 import { fullName } from '../../common/utils/request-context';
 import { renderLoginOtpEmail } from '../../queue/templates';
 import { activityService, type ActivityOrigin } from '../activity-logs/activity.service';
-import { channelsFor, deliverOtp, deliveryDetails, generateOtp, maskPhone, type DeliverySummary, type OtpChannel } from './otp-delivery';
+import { channelsFor, deliverOtp, deliveryDetails, generateOtp, maskPhone, smsCodeMatches, type DeliverySummary, type OtpChannel } from './otp-delivery';
 
 /** Wrong guesses allowed against one code before it stops working. */
 export const LOGIN_OTP_MAX_ATTEMPTS = 5;
@@ -138,7 +138,7 @@ export const loginOtpService = {
    */
   async verify(verificationId: string, otp: string, origin: Omit<ActivityOrigin, 'actorId'>): Promise<string> {
     logger.info({ verificationId }, '[OTP] login verification started');
-    const row = await prisma.loginOtp.findUnique({ where: { id: verificationId } });
+    const row = await prisma.loginOtp.findUnique({ where: { id: verificationId }, include: { user: { select: { phone: true } } } });
     if (!row || row.usedAt) throw sessionInvalid();
     if (row.expiresAt.getTime() <= Date.now()) throw otpExpired();
     if (row.attempts >= LOGIN_OTP_MAX_ATTEMPTS) throw tooManyAttempts();
@@ -155,7 +155,9 @@ export const loginOtpService = {
     });
     if (claimed.count === 0) throw tooManyAttempts();
 
-    if (!otpMatches(row.otpHash, row.id, otp)) {
+    // The emailed code, or — with Twilio Verify — the provider's own SMS code.
+    const matched = otpMatches(row.otpHash, row.id, otp) || (await smsCodeMatches(row.user.phone, row.channels, otp));
+    if (!matched) {
       const remaining = LOGIN_OTP_MAX_ATTEMPTS - (row.attempts + 1);
       logger.warn({ verificationId, userId: row.userId, remaining }, '[OTP] login verification failed: wrong code');
       void activityService.record(

@@ -62,8 +62,14 @@ const EnvSchema = z.object({
   SMS_ALLOW_REAL_SEND: bool.default(false),
   TWILIO_ACCOUNT_SID: z.string().optional().transform((v) => (v ? v : undefined)),
   TWILIO_AUTH_TOKEN: z.string().optional().transform((v) => (v ? v : undefined)),
-  /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). */
+  /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). Not needed with a Verify service. */
   TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
+  /**
+   * Twilio Verify service (VA…). When set, SMS codes go through Verify, which
+   * sends from Twilio's own numbers and makes its OWN code — so the SMS code
+   * differs from the emailed one, and either is accepted at verification.
+   */
+  TWILIO_VERIFY_SERVICE_SID: z.string().optional().transform((v) => (v ? v : undefined)),
   BREVO_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
   /** Sender name shown on the SMS: up to 11 letters/digits, or a number of up to 15 digits. */
   BREVO_SMS_SENDER: z.string().regex(/^([A-Za-z0-9]{1,11}|\d{1,15})$/, 'BREVO_SMS_SENDER: up to 11 letters/digits, or up to 15 digits').default('TimeFlow'),

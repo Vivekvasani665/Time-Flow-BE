@@ -112,4 +112,31 @@ describe('smsService', () => {
     configure({ SMS_PROVIDER: 'brevo', BREVO_API_KEY: 'xsmtpsib-wrong-kind' });
     expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_NOT_CONFIGURED');
   });
+
+  it('Twilio Verify: starts a verification without TWILIO_FROM and checks the code back', async () => {
+    configure({ SMS_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: 'AC1', TWILIO_AUTH_TOKEN: 't', TWILIO_FROM: undefined, TWILIO_VERIFY_SERVICE_SID: 'VA1' });
+    expect(smsService.providerGeneratesCode()).toBe(true);
+
+    respond(201, { sid: 'VE123', status: 'pending' });
+    await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('VE123');
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://verify.twilio.com/v2/Services/VA1/Verifications');
+    expect(String(init.body)).toBe('To=%2B919876543210&Channel=sms'); // our code is never sent to Twilio
+
+    respond(200, { status: 'approved', valid: true });
+    await expect(smsService.checkOtp('+919876543210', '111222')).resolves.toBe(true);
+    expect((vi.mocked(fetch).mock.calls[0] as [string])[0]).toBe('https://verify.twilio.com/v2/Services/VA1/VerificationCheck');
+    respond(200, { status: 'pending', valid: false });
+    await expect(smsService.checkOtp('+919876543210', '000000')).resolves.toBe(false);
+    respond(404, { code: 20404, message: 'not found' });
+    await expect(smsService.checkOtp('+919876543210', '111222')).resolves.toBe(false);
+  });
+
+  it('Twilio Verify: maps an unverified trial recipient to a delivery failure', async () => {
+    configure({ SMS_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: 'AC1', TWILIO_AUTH_TOKEN: 't', TWILIO_VERIFY_SERVICE_SID: 'VA1' });
+    respond(400, { code: 21608, message: 'The phone number is unverified.' });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_DELIVERY_FAILED');
+    respond(401, { code: 20003, message: 'Authenticate' });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_PROVIDER_AUTH_FAILED');
+  });
 });

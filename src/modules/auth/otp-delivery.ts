@@ -27,14 +27,33 @@ export type ChannelDelivery = { status: 'sent' } | { status: 'failed'; code: str
 export type OtpDelivery = Partial<Record<OtpChannel, ChannelDelivery>>;
 
 /** Summary fields every OTP challenge carries, so a client can say exactly where the code went. */
-export type DeliverySummary = { channels: OtpChannel[]; delivery: OtpDelivery; emailSent: boolean; smsSent: boolean };
+export type DeliverySummary = {
+  channels: OtpChannel[];
+  delivery: OtpDelivery;
+  emailSent: boolean;
+  smsSent: boolean;
+  /** False when the SMS carries the provider's own code (Twilio Verify): the two messages then hold different codes, and either works. */
+  sameCodeOnAllChannels: boolean;
+};
 
 export const summarize = (delivered: OtpChannel[], delivery: OtpDelivery): DeliverySummary => ({
   channels: delivered,
   delivery,
   emailSent: delivery.email?.status === 'sent',
   smsSent: delivery.sms?.status === 'sent',
+  sameCodeOnAllChannels: !(delivery.sms?.status === 'sent' && smsService.providerGeneratesCode()),
 });
+
+/**
+ * For a provider that makes its own SMS code (Twilio Verify): does `otp` match
+ * the code texted for this attempt? Only asked after the stored hash failed,
+ * and only when the SMS actually went out.
+ */
+export async function smsCodeMatches(phone: string | null, channels: readonly string[], otp: string): Promise<boolean> {
+  if (!smsService.providerGeneratesCode() || !channels.includes('sms')) return false;
+  const mobile = normalizeMobile(phone);
+  return mobile ? smsService.checkOtp(mobile, otp) : false;
+}
 
 /**
  * A number an SMS provider accepts: E.164, `+` and 8–15 digits. Formatting

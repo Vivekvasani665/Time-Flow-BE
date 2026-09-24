@@ -7,7 +7,7 @@ import { fullName } from '../../common/utils/request-context';
 import { renderSignupOtpEmail } from '../../queue/templates';
 import { activityService, type ActivityOrigin } from '../activity-logs/activity.service';
 import { maskEmail } from './login-otp.service';
-import { deliverOtp, deliveryDetails, generateOtp, maskPhone, OTP_CHANNELS, type DeliverySummary, type OtpChannel } from './otp-delivery';
+import { deliverOtp, deliveryDetails, generateOtp, maskPhone, OTP_CHANNELS, smsCodeMatches, type DeliverySummary, type OtpChannel } from './otp-delivery';
 
 /** Wrong guesses allowed against one code before it stops working. */
 export const SIGNUP_OTP_MAX_ATTEMPTS = 5;
@@ -111,7 +111,7 @@ export const signupOtpService = {
   async verify(verificationId: string, otp: string, origin: Omit<ActivityOrigin, 'actorId'>): Promise<string> {
     const row = await prisma.signupOtp.findUnique({
       where: { id: verificationId },
-      include: { user: { select: { status: true, deletedAt: true, firstName: true, lastName: true, email: true } } },
+      include: { user: { select: { status: true, deletedAt: true, firstName: true, lastName: true, email: true, phone: true } } },
     });
     if (!row || row.verifiedAt || row.user.deletedAt || row.user.status !== 'PENDING') throw sessionInvalid();
     if (row.expiresAt.getTime() <= Date.now()) throw otpExpired();
@@ -129,7 +129,9 @@ export const signupOtpService = {
     });
     if (claimed.count === 0) throw tooManyAttempts();
 
-    if (!otpMatches(row.otpHash, row.id, otp)) {
+    // The emailed code, or — with Twilio Verify — the provider's own SMS code.
+    const matched = otpMatches(row.otpHash, row.id, otp) || (await smsCodeMatches(row.user.phone, row.channels, otp));
+    if (!matched) {
       const remaining = SIGNUP_OTP_MAX_ATTEMPTS - (row.attempts + 1);
       if (remaining <= 0) throw tooManyAttempts();
       throw new AppError(400, 'SIGNUP_OTP_INVALID', `Incorrect code. ${remaining} ${remaining === 1 ? 'attempt' : 'attempts'} left.`);

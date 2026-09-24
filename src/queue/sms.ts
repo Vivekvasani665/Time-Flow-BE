@@ -178,7 +178,66 @@ async function brevo(message: SmsMessage): Promise<string> {
   return String(data.messageId ?? 'brevo');
 }
 
+// ── Twilio Verify ───────────────────────────────────────────
+// Verify sends from Twilio's own numbers (no TWILIO_FROM) and generates the
+// code itself; it is checked back through VerificationCheck.
+
+const verifyAuth = () => {
+  const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_VERIFY_SERVICE_SID: service } = env;
+  if (!sid || !token || !service) throw new SmsError('SMS_NOT_CONFIGURED', 'Twilio Verify needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_VERIFY_SERVICE_SID');
+  return {
+    base: `https://verify.twilio.com/v2/Services/${encodeURIComponent(service)}`,
+    headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+  };
+};
+
+const VERIFY_HINTS: Record<number, string> = {
+  20003: 'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN are wrong',
+  20404: 'TWILIO_VERIFY_SERVICE_SID does not exist on this account',
+  21608: 'trial account: verify this recipient in Twilio Console → Phone Numbers → Verified Caller IDs, or upgrade the account',
+  60200: 'the recipient number is not valid',
+  60203: 'too many codes sent to this number — wait 10 minutes',
+  60205: 'this number cannot receive SMS (landline?)',
+  60410: 'this number/country is blocked for Verify — Twilio Console → Verify → Geo permissions',
+};
+
+async function twilioVerifyStart(to: string): Promise<string> {
+  const { base, headers } = verifyAuth();
+  const { status, data } = await post('twilio-verify', `${base}/Verifications`, { headers, body: new URLSearchParams({ To: to, Channel: 'sms' }) });
+  if (status >= 300) {
+    const hint = VERIFY_HINTS[Number(data.code)];
+    throw providerFailure('twilio-verify', status, `${data.code ?? ''} ${data.message ?? 'no detail'}${hint ? ` — ${hint}` : ''}`.trim());
+  }
+  logger.info({ provider: 'twilio-verify', httpStatus: status, verificationSid: data.sid, providerStatus: data.status }, '[SMS] provider response: accepted');
+  return String(data.sid ?? 'twilio-verify');
+}
+
 export const smsService = {
+  /** True when the provider makes its own code (Twilio Verify), so the SMS code differs from the emailed one. */
+  providerGeneratesCode(): boolean {
+    return env.SMS_PROVIDER === 'twilio' && Boolean(env.TWILIO_VERIFY_SERVICE_SID);
+  },
+
+  /** Checks a code the provider generated. Any failure reads as "not approved" and is logged. */
+  async checkOtp(to: string, code: string): Promise<boolean> {
+    if (!smsService.providerGeneratesCode()) return false;
+    try {
+      const { base, headers } = verifyAuth();
+      const { status, data } = await post('twilio-verify', `${base}/VerificationCheck`, { headers, body: new URLSearchParams({ To: to, Code: code }) });
+      // 404: no pending verification for this number (already approved, expired, or never sent).
+      if (status === 404) return false;
+      if (status >= 300) {
+        logger.error({ provider: 'twilio-verify', httpStatus: status, detail: `${data.code ?? ''} ${data.message ?? ''}`.trim() }, '[SMS] code check failed');
+        return false;
+      }
+      logger.info({ provider: 'twilio-verify', to: tail(to), providerStatus: data.status }, '[SMS] code checked');
+      return data.status === 'approved';
+    } catch (err) {
+      logger.error({ provider: 'twilio-verify', reason: err instanceof Error ? err.message : String(err) }, '[SMS] code check failed');
+      return false;
+    }
+  },
+
   /** Sends one SMS through SMS_PROVIDER and returns the provider's message id. Throws SmsError. */
   async sendMessage(message: SmsMessage): Promise<string> {
     logger.info({ provider: env.SMS_PROVIDER, to: tail(message.to) }, '[SMS] OTP sending');
@@ -192,13 +251,16 @@ export const smsService = {
       logger.warn({ provider: env.SMS_PROVIDER }, '[SMS] not sent — set SMS_ALLOW_REAL_SEND=true to text real phones outside production');
       throw new SmsError('SMS_BLOCKED_IN_DEVELOPMENT', `SMS_PROVIDER=${env.SMS_PROVIDER} reaches real phones; set SMS_ALLOW_REAL_SEND=true to allow it outside production`);
     }
-    if (env.SMS_PROVIDER === 'twilio') return twilio(message);
+    if (env.SMS_PROVIDER === 'twilio') return smsService.providerGeneratesCode() ? twilioVerifyStart(message.to) : twilio(message);
     if (env.SMS_PROVIDER === '2factor') return twoFactor(message);
     if (env.SMS_PROVIDER === 'brevo') return brevo(message);
     return msg91(message);
   },
 
-  /** The OTP text for Twilio/log; MSG91 uses its DLT template with the same values. */
+  /**
+   * The OTP text for Twilio/log; MSG91 uses its DLT template with the same
+   * values. With Twilio Verify the text and code are Twilio's, not these.
+   */
   sendOtp(to: string, otp: string, minutes: number): Promise<string> {
     return smsService.sendMessage({
       to,

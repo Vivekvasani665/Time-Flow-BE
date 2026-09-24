@@ -191,4 +191,27 @@ describe('Login OTP by email + SMS', () => {
     expect(expired.status).toBe(401);
     expect(expired.body.code).toBe('LOGIN_OTP_EXPIRED');
   });
+
+  it('with Twilio Verify, the SMS carries its own code and either code signs in', async () => {
+    vi.spyOn(sms.smsService, 'providerGeneratesCode').mockReturnValue(true);
+    const check = vi.spyOn(sms.smsService, 'checkOtp').mockImplementation(async (_to, code) => code === '246810');
+
+    const res = await login(await makeUser(uniquePhone()));
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ channels: ['email', 'sms'], smsSent: true, sameCodeOnAllChannels: false });
+
+    // A wrong code is checked against Twilio too, and still counts as one attempt.
+    const wrong = await verify(res.body.data.verificationId, emailedOtp === '999999' ? '999998' : '999999');
+    expect(wrong.body.code).toBe('LOGIN_OTP_INVALID');
+    expect(check).toHaveBeenCalledTimes(1);
+
+    const ok = await verify(res.body.data.verificationId, '246810'); // the code Twilio texted
+    expect(ok.status).toBe(200);
+
+    // The emailed code works as well, without asking Twilio.
+    check.mockClear();
+    const res2 = await login(await makeUser(uniquePhone()));
+    expect((await verify(res2.body.data.verificationId, emailedOtp)).status).toBe(200);
+    expect(check).not.toHaveBeenCalled();
+  });
 });
