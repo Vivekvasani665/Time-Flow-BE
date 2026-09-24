@@ -125,31 +125,57 @@ async function twoFactor(message: SmsMessage): Promise<string> {
 }
 
 /**
- * Brevo transactional SMS (POST /v3/transactionalSMS/sms, the SDK's
- * sendTransacSms). Answers 201 with a messageId and the credits left; a bad
- * key or an IP not on the account's authorised list is 401, no credits 402.
+ * Brevo SMS credits left, from the account's plan list ({type:'sms', credits}).
+ * Brevo accepts a send with no credits (201) and only rejects it afterwards,
+ * so without this check a code would be reported as sent when it never is.
+ * Null when the account cannot be read — the send is then tried anyway.
+ */
+async function brevoSmsCredits(apiKey: string): Promise<number | null> {
+  try {
+    const res = await fetch('https://api.brevo.com/v3/account', {
+      headers: { 'api-key': apiKey, accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const { plan } = (await res.json()) as { plan?: { type?: string; credits?: number }[] };
+    return (plan ?? []).filter((p) => p.type === 'sms').reduce((sum, p) => sum + (p.credits ?? 0), 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Brevo transactional SMS (POST /v3/transactionalSMS/send). Answers 201 with a
+ * messageId; delivery happens afterwards and shows in Brevo → SMS → Logs. A bad
+ * key or an IP not on the account's authorised list is 401.
  */
 async function brevo(message: SmsMessage): Promise<string> {
   const { BREVO_API_KEY: apiKey, BREVO_SMS_SENDER: sender } = env;
   if (!apiKey) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=brevo needs BREVO_API_KEY (an xkeysib- API key)');
   if (apiKey.startsWith('xsmtpsib-')) throw new SmsError('SMS_NOT_CONFIGURED', 'BREVO_API_KEY is an SMTP key (xsmtpsib-); SMS needs an API key (xkeysib-)');
 
-  const { status, data } = await post('brevo', 'https://api.brevo.com/v3/transactionalSMS/sms', {
+  const credits = await brevoSmsCredits(apiKey);
+  if (credits === 0) {
+    logger.error({ provider: 'brevo' }, '[SMS] provider response: not sent — the Brevo account has no SMS credits; buy them under Brevo → SMS');
+    throw new SmsError('SMS_DELIVERY_FAILED', 'Brevo account has no SMS credits');
+  }
+
+  const { status, data } = await post('brevo', 'https://api.brevo.com/v3/transactionalSMS/send', {
     headers: { 'api-key': apiKey, 'Content-Type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ sender, recipient: message.to.replace(/^\+/, ''), content: message.body, type: 'transactional', tag: 'otp' }),
+    body: JSON.stringify({ sender, recipient: message.to.replace(/^\+/, ''), content: message.body, type: 'transactional' }),
   });
   if (status >= 300) {
     const detail = String(data.message ?? data.code ?? 'no detail');
     const hint =
       status === 401 && /ip address/i.test(detail)
         ? ' — allow this server\'s IP at https://app.brevo.com/security/authorised_ips'
-        : status === 402
+        : status === 402 || /credit/i.test(detail)
           ? ' — the Brevo account has no SMS credits; buy them under Brevo → SMS'
           : '';
     throw providerFailure('brevo', status, `${detail}${hint}`);
   }
-  logger.info({ provider: 'brevo', httpStatus: status, messageId: data.messageId, remainingCredits: data.remainingCredits }, '[SMS] provider response: accepted');
-  return String(data.messageId ?? data.reference ?? 'brevo');
+  logger.info({ provider: 'brevo', httpStatus: status, messageId: data.messageId, smsCredits: credits }, '[SMS] provider response: accepted (delivery status in Brevo → SMS → Logs)');
+  return String(data.messageId ?? 'brevo');
 }
 
 export const smsService = {

@@ -79,24 +79,36 @@ describe('smsService', () => {
     expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_NOT_CONFIGURED');
   });
 
-  it('sends through Brevo: number without +, sender, transactional type', async () => {
+  const brevoReplies = (account: unknown, send?: { status: number; body: unknown }) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(account), { status: 200 }));
+    if (send) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(send.body), { status: send.status }));
+    vi.stubGlobal('fetch', fetchMock);
+  };
+  const withSmsCredits = { plan: [{ type: 'free', credits: 300 }, { type: 'sms', credits: 50 }] };
+
+  it('sends through Brevo /transactionalSMS/send: number without +, sender, transactional type', async () => {
     configure({ SMS_PROVIDER: 'brevo', BREVO_API_KEY: 'xkeysib-test', BREVO_SMS_SENDER: 'TimeFlow' });
-    respond(201, { reference: 'ref-1', messageId: 1511882900176220, smsCount: 1, remainingCredits: 99 });
-    await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('1511882900176220');
-    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://api.brevo.com/v3/transactionalSMS/sms');
+    brevoReplies(withSmsCredits, { status: 201, body: { messageId: 2371377522591951 } });
+    await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('2371377522591951');
+    const [url, init] = vi.mocked(fetch).mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://api.brevo.com/v3/transactionalSMS/send');
     expect((init.headers as Record<string, string>)['api-key']).toBe('xkeysib-test');
     const body = JSON.parse(String(init.body));
     expect(body).toMatchObject({ sender: 'TimeFlow', recipient: '919876543210', type: 'transactional' });
     expect(body.content).toContain('482913');
   });
 
-  it('maps Brevo failures: unauthorised IP/key, no credits, SMTP key given by mistake', async () => {
+  it('does not report a Brevo SMS as sent when the account has no SMS credits', async () => {
     configure({ SMS_PROVIDER: 'brevo', BREVO_API_KEY: 'xkeysib-test' });
-    respond(401, { code: 'unauthorized', message: 'We have detected you are using an unrecognised IP address 1.2.3.4.' });
-    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_PROVIDER_AUTH_FAILED');
-    respond(402, { code: 'not_enough_credits', message: 'Not enough credits' });
+    brevoReplies({ plan: [{ type: 'free', credits: 300, creditsType: 'sendLimit' }] });
     expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_DELIVERY_FAILED');
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1); // never attempted the send
+  });
+
+  it('maps Brevo failures: unauthorised IP/key, SMTP key given by mistake', async () => {
+    configure({ SMS_PROVIDER: 'brevo', BREVO_API_KEY: 'xkeysib-test' });
+    brevoReplies(withSmsCredits, { status: 401, body: { code: 'unauthorized', message: 'We have detected you are using an unrecognised IP address 1.2.3.4.' } });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_PROVIDER_AUTH_FAILED');
     configure({ SMS_PROVIDER: 'brevo', BREVO_API_KEY: 'xsmtpsib-wrong-kind' });
     expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_NOT_CONFIGURED');
   });
