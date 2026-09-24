@@ -99,6 +99,13 @@ const EnvSchema = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
 
   UPLOAD_DIR: z.string().default('./uploads'),
+
+  /**
+   * Adds the raw error text to 500 responses as `debug`. Off by default so
+   * database errors and file paths never reach a browser; the full error is
+   * always in the server log. Ignored in production.
+   */
+  EXPOSE_ERROR_DETAILS: bool.default(false),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

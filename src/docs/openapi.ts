@@ -173,10 +173,11 @@ export const openApiDocument = {
     schemas: {
       Error: {
         type: 'object',
-        required: ['success', 'message', 'code'],
+        required: ['success', 'statusCode', 'message', 'code'],
         properties: {
           success: { type: 'boolean', example: false },
-          message: str(),
+          statusCode: { ...int, example: 400 },
+          message: str({ description: 'Safe to show to users. 5xx responses never carry internal details.' }),
           code: str(),
           details: arrayOf({ type: 'object', properties: { path: str(), message: str() } }),
           requestId: str(),
