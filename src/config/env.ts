@@ -45,6 +45,9 @@ const EnvSchema = z.object({
   /** How long an administrator-issued password reset link stays usable. Links go to APP_URL/reset-password. */
   RESET_PASSWORD_TOKEN_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
 
+  /** How long a Super Admin's invitation link stays usable. Links go to APP_URL/accept-invitation. */
+  INVITATION_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+
   CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_LOGIN_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),

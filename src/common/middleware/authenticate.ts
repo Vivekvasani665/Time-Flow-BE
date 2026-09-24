@@ -42,11 +42,11 @@ export function requirePermission(...permissions: PermissionKey[]): RequestHandl
 
 /**
  * Restricts a route to the Super Admin role itself, not merely to a permission
- * set — for account-takeover-grade actions such as issuing password reset links.
+ * set — for account-takeover-grade actions such as issuing password reset or invitation links.
  * The role's name is immutable (it is the system role). Must run after `authenticate`.
  */
 export const requireSuperAdmin: RequestHandler = (req, _res, next) => {
   if (!req.auth) return next(new UnauthorizedError());
-  if (req.auth.roleName !== SUPER_ADMIN_ROLE) return next(new ForbiddenError('Only a Super Admin can manage password resets'));
+  if (req.auth.roleName !== SUPER_ADMIN_ROLE) return next(new ForbiddenError('Only a Super Admin can perform this action'));
   return next();
 };

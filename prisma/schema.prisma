@@ -99,6 +99,8 @@ model User {
   emailsSent      EmailLog[]              @relation("EmailsSent")
   passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
   requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
+  sentInvitations UserInvitation[]        @relation("InvitationSender")
+  invitation      UserInvitation?         @relation("InvitationAcceptedUser")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -117,6 +119,7 @@ model Role {
 
   users       User[]
   permissions RolePermission[]
+  invitations UserInvitation[]
 
   @@map("roles")
 }
@@ -318,6 +321,40 @@ model PasswordResetRequest {
   @@index([userId, createdAt])
   @@index([status])
   @@map("password_reset_requests")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+/// A Super Admin's invitation for a new member. Holds only the email and role;
+/// the User row is created when the invitee sets their password through the
+/// link. Only a SHA-256 of the token is stored, and the link works once. At most
+/// one PENDING row per email — inviting again revokes the previous link.
+model UserInvitation {
+  id             String           @id @default(uuid()) @db.Uuid
+  /// Always stored lower-cased.
+  email          String           @db.VarChar(254)
+  roleId         String           @map("role_id") @db.Uuid
+  invitedById    String?          @map("invited_by_id") @db.Uuid
+  tokenHash      String           @unique @map("token_hash") @db.VarChar(64)
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime         @map("expires_at") @db.Timestamptz(3)
+  acceptedUserId String?          @unique @map("accepted_user_id") @db.Uuid
+  acceptedAt     DateTime?        @map("accepted_at") @db.Timestamptz(3)
+  revokedAt      DateTime?        @map("revoked_at") @db.Timestamptz(3)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  role         Role  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  invitedBy    User? @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: SetNull)
+  acceptedUser User? @relation("InvitationAcceptedUser", fields: [acceptedUserId], references: [id], onDelete: SetNull)
+
+  @@index([email, createdAt])
+  @@index([status, createdAt])
+  @@map("user_invitations")
 }
 
 model RefreshToken {

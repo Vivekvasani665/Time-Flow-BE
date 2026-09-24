@@ -145,6 +145,7 @@ export const openApiDocument = {
     { name: 'Auth' },
     { name: 'Users' },
     { name: 'Password Resets' },
+    { name: 'Invitations', description: 'Super Admin → invite link → set password → login. No direct user creation.' },
     { name: 'Roles' },
     { name: 'Projects' },
     { name: 'Tasks' },
@@ -239,6 +240,22 @@ export const openApiDocument = {
           completedAt: nullable(dateTime),
           cancelledAt: nullable(dateTime),
           requestedBy: nullable(ref('UserRef')),
+        },
+      },
+      Invitation: {
+        type: 'object',
+        description: 'Status only. The token and its hash are never returned after creation.',
+        properties: {
+          id: uuid,
+          email: str({ format: 'email' }),
+          status: { type: 'string', enum: ['PENDING', 'ACCEPTED', 'EXPIRED', 'REVOKED'] },
+          expiresAt: dateTime,
+          acceptedAt: nullable(dateTime),
+          revokedAt: nullable(dateTime),
+          createdAt: dateTime,
+          role: { type: 'object', properties: { id: uuid, name: str() } },
+          invitedBy: nullable(ref('UserRef')),
+          acceptedUser: nullable(ref('UserRef')),
         },
       },
       RecoveryCodes: {
@@ -790,6 +807,88 @@ export const openApiDocument = {
         security: secured,
         parameters: [q('userIds', str(), 'Comma-separated user ids (max 100).')],
         responses: { '200': success(arrayOf(ref('PasswordResetRequest'))), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/admin/invitations': {
+      post: {
+        tags: ['Invitations'],
+        summary: 'Generate an invitation link',
+        description:
+          '**Super Admin only** (by role). Takes only the email and role; the account is created when the invitee sets a password. ' +
+          'Returns `inviteUrl` (APP_URL/accept-invitation?token=…) for the "Copy Link" button — it is shown only once. ' +
+          'Inviting the same email again revokes the previous link. Valid for `INVITATION_EXPIRY_HOURS` (default 72).',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['email', 'roleId'], properties: { email: str({ format: 'email' }), roleId: uuid } }),
+        responses: {
+          '201': success({ type: 'object', properties: { invitation: ref('Invitation'), inviteUrl: str({ example: 'http://localhost:3000/accept-invitation?token=…' }) } }),
+          '409': errorResponse('Email already registered', 'USER_EMAIL_EXISTS', 'A user with this email already exists'),
+          ...errors(400, 401, 403, 429),
+        },
+      },
+      get: {
+        tags: ['Invitations'],
+        summary: 'List invitations',
+        description: '**Super Admin only.** A lapsed PENDING link is reported (and filtered) as EXPIRED.',
+        security: secured,
+        parameters: [...listParams(['createdAt', 'email', 'expiresAt']), q('status', enumOf('PENDING', 'ACCEPTED', 'EXPIRED', 'REVOKED'))],
+        responses: { '200': paginatedOf(ref('Invitation')), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/admin/invitations/{id}': {
+      delete: {
+        tags: ['Invitations'],
+        summary: 'Revoke a pending invitation',
+        description: '**Super Admin only.**',
+        security: secured,
+        parameters: [idParam],
+        responses: {
+          '200': success(ref('Invitation')),
+          '400': errorResponse('Not pending', 'INVITATION_NOT_PENDING', 'Only a pending invitation can be revoked'),
+          ...errors(401, 403, 404),
+        },
+      },
+    },
+    '/api/auth/invitations/verify': {
+      get: {
+        tags: ['Invitations'],
+        summary: 'Check an invitation link',
+        description: 'Public. Called by the Set Password page on load. Rate limited to 30 per minute per IP.',
+        parameters: [{ name: 'token', in: 'query', required: true, schema: str() }],
+        responses: {
+          '200': success({
+            type: 'object',
+            properties: { valid: bool, email: str({ format: 'email' }), role: { type: 'object', properties: { id: uuid, name: str() } }, expiresAt: dateTime },
+          }),
+          '410': errorResponse('Link expired, used, revoked or unknown', 'INVITATION_LINK_INVALID', 'Invitation Link Expired or Already Used'),
+          ...errors(429),
+        },
+      },
+    },
+    '/api/auth/invitations/accept': {
+      post: {
+        tags: ['Invitations'],
+        summary: 'Set a password and create the account',
+        description:
+          'Public. The password needs 8+ characters with upper- and lowercase letters, a number and a special character. ' +
+          'Creates the user with the invited email and role, and spends the link. Does not sign in — redirect to Login. ' +
+          'Name is optional; if omitted it is derived from the email. Rate limited to 10 per 15 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['token', 'password', 'confirmPassword'],
+          properties: {
+            token: str(),
+            password: str({ example: 'NewPassword123!' }),
+            confirmPassword: str({ example: 'NewPassword123!' }),
+            firstName: str(),
+            lastName: str(),
+          },
+        }),
+        responses: {
+          '200': success({ type: 'object', properties: { email: str({ format: 'email' }) } }),
+          '409': errorResponse('Email already registered', 'USER_EMAIL_EXISTS', 'A user with this email already exists'),
+          '410': errorResponse('Link expired, used, revoked or unknown', 'INVITATION_LINK_INVALID', 'Invitation Link Expired or Already Used'),
+          ...errors(400, 429),
+        },
       },
     },
     '/api/auth/password-reset/verify': {
