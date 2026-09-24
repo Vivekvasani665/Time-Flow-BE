@@ -38,9 +38,9 @@ function providerFailure(provider: string, status: number, detail: string): SmsE
   return new SmsError('SMS_DELIVERY_FAILED', `${provider} rejected the message (${status}): ${detail}`);
 }
 
-async function post(provider: string, url: string, init: RequestInit): Promise<{ status: number; data: Record<string, unknown> }> {
+async function post(provider: string, url: string, init: RequestInit & { method?: string }): Promise<{ status: number; data: Record<string, unknown> }> {
   try {
-    const res = await fetch(url, { ...init, method: 'POST', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const res = await fetch(url, { method: 'POST', ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     return { status: res.status, data };
   } catch (err) {
@@ -92,6 +92,27 @@ async function msg91(message: SmsMessage): Promise<string> {
   return detail;
 }
 
+/**
+ * 2Factor.in OTP SMS: GET /API/V1/{key}/SMS/{number}/{otp}[/{template}].
+ * The message text is 2Factor's DLT-approved OTP template, so `body` is not
+ * sent. Replies {"Status":"Success","Details":"<session id>"}; an unknown key
+ * is HTTP 400 with Details "Invalid API Key".
+ */
+async function twoFactor(message: SmsMessage): Promise<string> {
+  const { TWOFACTOR_API_KEY: apiKey, TWOFACTOR_TEMPLATE_NAME: template } = env;
+  if (!apiKey) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=2factor needs TWOFACTOR_API_KEY');
+  const otp = message.vars?.otp;
+  if (!otp) throw new SmsError('SMS_DELIVERY_FAILED', '2factor only sends OTP messages');
+
+  // The key is part of the URL, so the URL itself is never logged.
+  const path = [apiKey, 'SMS', message.to.replace(/^\+/, ''), otp, ...(template ? [template] : [])].map(encodeURIComponent).join('/');
+  const { status, data } = await post('2factor', `https://2factor.in/API/V1/${path}`, { method: 'GET' });
+  const detail = String(data.Details ?? 'no detail');
+  if (status >= 300 || data.Status !== 'Success') throw providerFailure('2factor', /api key/i.test(detail) ? 401 : status >= 300 ? status : 400, detail);
+  logger.info({ provider: '2factor', httpStatus: status, sessionId: detail }, '[SMS] provider response: accepted');
+  return detail;
+}
+
 export const smsService = {
   /** Sends one SMS through SMS_PROVIDER and returns the provider's message id. Throws SmsError. */
   async sendMessage(message: SmsMessage): Promise<string> {
@@ -106,7 +127,9 @@ export const smsService = {
       logger.warn({ provider: env.SMS_PROVIDER }, '[SMS] not sent — set SMS_ALLOW_REAL_SEND=true to text real phones outside production');
       throw new SmsError('SMS_BLOCKED_IN_DEVELOPMENT', `SMS_PROVIDER=${env.SMS_PROVIDER} reaches real phones; set SMS_ALLOW_REAL_SEND=true to allow it outside production`);
     }
-    return env.SMS_PROVIDER === 'twilio' ? twilio(message) : msg91(message);
+    if (env.SMS_PROVIDER === 'twilio') return twilio(message);
+    if (env.SMS_PROVIDER === '2factor') return twoFactor(message);
+    return msg91(message);
   },
 
   /** The OTP text for Twilio/log; MSG91 uses its DLT template with the same values. */

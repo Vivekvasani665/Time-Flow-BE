@@ -54,4 +54,28 @@ describe('smsService', () => {
     respond(201, { sid: 'SM123', status: 'queued' });
     await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('SM123');
   });
+
+  it('sends through 2Factor with the number (no +), the code and an optional template', async () => {
+    configure({ SMS_PROVIDER: '2factor', TWOFACTOR_API_KEY: 'key-123', TWOFACTOR_TEMPLATE_NAME: undefined });
+    respond(200, { Status: 'Success', Details: 'session-1' });
+    await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('session-1');
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://2factor.in/API/V1/key-123/SMS/919876543210/482913');
+    expect(init.method).toBe('GET');
+
+    configure({ SMS_PROVIDER: '2factor', TWOFACTOR_API_KEY: 'key-123', TWOFACTOR_TEMPLATE_NAME: 'TimeFlowOTP' });
+    respond(200, { Status: 'Success', Details: 'session-2' });
+    await smsService.sendOtp('+919876543210', '482913', 5);
+    expect((vi.mocked(fetch).mock.calls[0] as [string])[0]).toBe('https://2factor.in/API/V1/key-123/SMS/919876543210/482913/TimeFlowOTP');
+  });
+
+  it('maps 2Factor failures: bad key, rejection, and a missing key', async () => {
+    configure({ SMS_PROVIDER: '2factor', TWOFACTOR_API_KEY: 'bad' });
+    respond(400, { Status: 'Error', Details: 'Invalid API Key' });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_PROVIDER_AUTH_FAILED');
+    respond(200, { Status: 'Error', Details: 'Insufficient balance' });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_DELIVERY_FAILED');
+    configure({ SMS_PROVIDER: '2factor', TWOFACTOR_API_KEY: undefined });
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_NOT_CONFIGURED');
+  });
 });

@@ -52,14 +52,19 @@ const EnvSchema = z.object({
    *   twilio — Twilio Messages API; needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
    *   msg91  — MSG91 Flow API; needs MSG91_AUTH_KEY and a DLT-approved MSG91_TEMPLATE_ID
    *            whose variables are ##otp## and ##minutes##
+   *   2factor — 2Factor.in OTP SMS; needs TWOFACTOR_API_KEY. Uses 2Factor's own
+   *            DLT-approved OTP template, so no DLT registration of your own
    */
-  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91']).default('log')),
+  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91', '2factor']).default('log')),
   /** Same safety catch as EMAIL_ALLOW_REAL_SEND: outside production a real provider is refused unless set. */
   SMS_ALLOW_REAL_SEND: bool.default(false),
   TWILIO_ACCOUNT_SID: z.string().optional().transform((v) => (v ? v : undefined)),
   TWILIO_AUTH_TOKEN: z.string().optional().transform((v) => (v ? v : undefined)),
   /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). */
   TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
+  TWOFACTOR_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Optional name of an OTP template approved in the 2Factor dashboard; their default is used when unset. */
+  TWOFACTOR_TEMPLATE_NAME: z.string().optional().transform((v) => (v ? v : undefined)),
   MSG91_AUTH_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
   MSG91_TEMPLATE_ID: z.string().optional().transform((v) => (v ? v : undefined)),
   /** 6-letter DLT-registered header, e.g. TMFLOW. Optional when the template already has one. */
@@ -135,12 +140,13 @@ export type Env = z.infer<typeof EnvSchema>;
 
 function loadEnv(): Env {
   // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name,
-  // and the generic SMS_API_KEY / SMS_TEMPLATE_ID / SMS_SENDER_ID for MSG91's.
+  // and the generic SMS_API_KEY / SMS_TEMPLATE_ID / SMS_SENDER_ID for the SMS provider's.
   const e = process.env;
   const parsed = EnvSchema.safeParse({
     ...e,
     SMTP_PASS: e.SMTP_PASS || e.SMTP_PASSWORD,
     MSG91_AUTH_KEY: e.MSG91_AUTH_KEY || e.SMS_API_KEY,
+    TWOFACTOR_API_KEY: e.TWOFACTOR_API_KEY || e.SMS_API_KEY,
     MSG91_TEMPLATE_ID: e.MSG91_TEMPLATE_ID || e.SMS_TEMPLATE_ID,
     MSG91_SENDER_ID: e.MSG91_SENDER_ID || e.SMS_SENDER_ID,
   });
