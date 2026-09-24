@@ -124,6 +124,34 @@ async function twoFactor(message: SmsMessage): Promise<string> {
   return detail;
 }
 
+/**
+ * Brevo transactional SMS (POST /v3/transactionalSMS/sms, the SDK's
+ * sendTransacSms). Answers 201 with a messageId and the credits left; a bad
+ * key or an IP not on the account's authorised list is 401, no credits 402.
+ */
+async function brevo(message: SmsMessage): Promise<string> {
+  const { BREVO_API_KEY: apiKey, BREVO_SMS_SENDER: sender } = env;
+  if (!apiKey) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=brevo needs BREVO_API_KEY (an xkeysib- API key)');
+  if (apiKey.startsWith('xsmtpsib-')) throw new SmsError('SMS_NOT_CONFIGURED', 'BREVO_API_KEY is an SMTP key (xsmtpsib-); SMS needs an API key (xkeysib-)');
+
+  const { status, data } = await post('brevo', 'https://api.brevo.com/v3/transactionalSMS/sms', {
+    headers: { 'api-key': apiKey, 'Content-Type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ sender, recipient: message.to.replace(/^\+/, ''), content: message.body, type: 'transactional', tag: 'otp' }),
+  });
+  if (status >= 300) {
+    const detail = String(data.message ?? data.code ?? 'no detail');
+    const hint =
+      status === 401 && /ip address/i.test(detail)
+        ? ' — allow this server\'s IP at https://app.brevo.com/security/authorised_ips'
+        : status === 402
+          ? ' — the Brevo account has no SMS credits; buy them under Brevo → SMS'
+          : '';
+    throw providerFailure('brevo', status, `${detail}${hint}`);
+  }
+  logger.info({ provider: 'brevo', httpStatus: status, messageId: data.messageId, remainingCredits: data.remainingCredits }, '[SMS] provider response: accepted');
+  return String(data.messageId ?? data.reference ?? 'brevo');
+}
+
 export const smsService = {
   /** Sends one SMS through SMS_PROVIDER and returns the provider's message id. Throws SmsError. */
   async sendMessage(message: SmsMessage): Promise<string> {
@@ -140,6 +168,7 @@ export const smsService = {
     }
     if (env.SMS_PROVIDER === 'twilio') return twilio(message);
     if (env.SMS_PROVIDER === '2factor') return twoFactor(message);
+    if (env.SMS_PROVIDER === 'brevo') return brevo(message);
     return msg91(message);
   },
 

@@ -54,14 +54,19 @@ const EnvSchema = z.object({
    *            whose variables are ##otp## and ##minutes##
    *   2factor — 2Factor.in OTP SMS; needs TWOFACTOR_API_KEY. Uses 2Factor's own
    *            DLT-approved OTP template, so no DLT registration of your own
+   *   brevo  — Brevo transactional SMS; needs BREVO_API_KEY (xkeysib-…, not the
+   *            xsmtpsib- SMTP key) and SMS credits on the Brevo account
    */
-  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91', '2factor']).default('log')),
+  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91', '2factor', 'brevo']).default('log')),
   /** Same safety catch as EMAIL_ALLOW_REAL_SEND: outside production a real provider is refused unless set. */
   SMS_ALLOW_REAL_SEND: bool.default(false),
   TWILIO_ACCOUNT_SID: z.string().optional().transform((v) => (v ? v : undefined)),
   TWILIO_AUTH_TOKEN: z.string().optional().transform((v) => (v ? v : undefined)),
   /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). */
   TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
+  BREVO_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Sender name shown on the SMS: up to 11 letters/digits, or a number of up to 15 digits. */
+  BREVO_SMS_SENDER: z.string().regex(/^([A-Za-z0-9]{1,11}|\d{1,15})$/, 'BREVO_SMS_SENDER: up to 11 letters/digits, or up to 15 digits').default('TimeFlow'),
   TWOFACTOR_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
   /** Optional name of an OTP template approved in the 2Factor dashboard; their default is used when unset. */
   TWOFACTOR_TEMPLATE_NAME: z.string().optional().transform((v) => (v ? v : undefined)),
@@ -147,6 +152,8 @@ function loadEnv(): Env {
     SMTP_PASS: e.SMTP_PASS || e.SMTP_PASSWORD,
     MSG91_AUTH_KEY: e.MSG91_AUTH_KEY || e.SMS_API_KEY,
     TWOFACTOR_API_KEY: e.TWOFACTOR_API_KEY || e.SMS_API_KEY,
+    BREVO_API_KEY: e.BREVO_API_KEY || e.SMS_API_KEY,
+    BREVO_SMS_SENDER: e.BREVO_SMS_SENDER || e.SMS_SENDER_ID || undefined,
     MSG91_TEMPLATE_ID: e.MSG91_TEMPLATE_ID || e.SMS_TEMPLATE_ID,
     MSG91_SENDER_ID: e.MSG91_SENDER_ID || e.SMS_SENDER_ID,
   });
