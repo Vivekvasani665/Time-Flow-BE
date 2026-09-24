@@ -47,7 +47,13 @@ export const verifyLoginOtpSchema = z
   })
   .strict();
 
-export const resendLoginOtpSchema = z.object({ verificationId: z.uuid({ message: 'Invalid verification id' }) }).strict();
+/** `channel` is optional so existing clients keep working; `both` sends by email and SMS. */
+export const resendLoginOtpSchema = z
+  .object({
+    verificationId: z.uuid({ message: 'Invalid verification id' }),
+    channel: z.enum(['email', 'sms', 'both'], { message: 'Channel must be email, sms or both' }).default('both'),
+  })
+  .strict();
 
 export const twoFactorCodeSchema = z.object({ code: twoFactorCode }).strict();
 

@@ -50,7 +50,7 @@ describe('smsService', () => {
     respond(401, { code: 20003, message: 'Authenticate' });
     expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_PROVIDER_AUTH_FAILED');
     respond(400, { code: 21211, message: "Invalid 'To' Phone Number" });
-    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_SEND_FAILED');
+    expect((await failure(smsService.sendOtp('+919876543210', '482913', 5))).code).toBe('SMS_DELIVERY_FAILED');
     respond(201, { sid: 'SM123', status: 'queued' });
     await expect(smsService.sendOtp('+919876543210', '482913', 5)).resolves.toBe('SM123');
   });

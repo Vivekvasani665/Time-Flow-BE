@@ -8,7 +8,13 @@ export type SmsMessage = { to: string; body: string; vars?: { otp: string; minut
  * Why a message did not go out. Safe to show a client: it names the kind of
  * failure, never the provider's raw reply (that stays in the server log).
  */
-export type SmsFailureCode = 'SMS_NOT_CONFIGURED' | 'SMS_BLOCKED_IN_DEVELOPMENT' | 'SMS_PROVIDER_AUTH_FAILED' | 'SMS_SEND_FAILED';
+export type SmsFailureCode =
+  | 'INVALID_PHONE_NUMBER'
+  | 'SMS_NOT_CONFIGURED'
+  | 'SMS_BLOCKED_IN_DEVELOPMENT'
+  | 'SMS_PROVIDER_AUTH_FAILED'
+  | 'SMS_PROVIDER_UNAVAILABLE'
+  | 'SMS_DELIVERY_FAILED';
 
 export class SmsError extends Error {
   constructor(
@@ -26,9 +32,10 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const tail = (to: string) => `…${to.slice(-4)}`;
 
 function providerFailure(provider: string, status: number, detail: string): SmsError {
-  logger.error({ provider, httpStatus: status, detail }, '[SMS] provider rejected the message');
+  logger.error({ provider, httpStatus: status, detail }, '[SMS] provider response: rejected');
   if (status === 401 || status === 403) return new SmsError('SMS_PROVIDER_AUTH_FAILED', `${provider} rejected the credentials (${status})`);
-  return new SmsError('SMS_SEND_FAILED', `${provider} rejected the message (${status}): ${detail}`);
+  if (status >= 500) return new SmsError('SMS_PROVIDER_UNAVAILABLE', `${provider} is unavailable (${status}): ${detail}`);
+  return new SmsError('SMS_DELIVERY_FAILED', `${provider} rejected the message (${status}): ${detail}`);
 }
 
 async function post(provider: string, url: string, init: RequestInit): Promise<{ status: number; data: Record<string, unknown> }> {
@@ -39,7 +46,7 @@ async function post(provider: string, url: string, init: RequestInit): Promise<{
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     logger.error({ provider, reason }, '[SMS] provider could not be reached');
-    throw new SmsError('SMS_SEND_FAILED', `${provider} could not be reached: ${reason}`);
+    throw new SmsError('SMS_PROVIDER_UNAVAILABLE', `${provider} could not be reached: ${reason}`);
   }
 }
 
@@ -56,7 +63,7 @@ async function twilio(message: SmsMessage): Promise<string> {
     body: form,
   });
   if (status >= 300) throw providerFailure('twilio', status, `${data.code ?? ''} ${data.message ?? 'no detail'}`.trim());
-  logger.info({ provider: 'twilio', httpStatus: status, messageId: data.sid, providerStatus: data.status }, '[SMS] provider accepted the message');
+  logger.info({ provider: 'twilio', httpStatus: status, messageId: data.sid, providerStatus: data.status }, '[SMS] provider response: accepted');
   return String(data.sid ?? 'twilio');
 }
 
@@ -81,14 +88,14 @@ async function msg91(message: SmsMessage): Promise<string> {
   // MSG91 answers 200 with {"type":"error"} for most failures, including a bad auth key.
   const detail = String(data.message ?? 'no detail');
   if (status >= 300 || data.type === 'error') throw providerFailure('msg91', /auth/i.test(detail) && status < 300 ? 401 : status, detail);
-  logger.info({ provider: 'msg91', httpStatus: status, requestId: data.message }, '[SMS] provider accepted the message');
+  logger.info({ provider: 'msg91', httpStatus: status, requestId: data.message }, '[SMS] provider response: accepted');
   return detail;
 }
 
 export const smsService = {
   /** Sends one SMS through SMS_PROVIDER and returns the provider's message id. Throws SmsError. */
   async sendMessage(message: SmsMessage): Promise<string> {
-    logger.info({ provider: env.SMS_PROVIDER, to: tail(message.to) }, '[SMS] send started');
+    logger.info({ provider: env.SMS_PROVIDER, to: tail(message.to) }, '[SMS] OTP sending');
     if (env.SMS_PROVIDER === 'log') {
       // Nothing leaves the machine. Outside production the text is logged so a
       // developer without an SMS account can still read the code.

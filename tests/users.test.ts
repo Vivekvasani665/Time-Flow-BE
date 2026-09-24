@@ -122,3 +122,17 @@ describe('User mobile numbers', () => {
     expect(dup.body.code).toBe('USER_PHONE_EXISTS');
   });
 });
+
+describe('User mobile number format', () => {
+  it('stores E.164 and rejects a number without a country code', async () => {
+    const admin = await loginAs('admin');
+    const role = await roleId('Employee');
+    const base = { firstName: 'Ria', lastName: 'Rao', password: 'Str0ngPass', roleId: role };
+    const digits = uniquePhone().slice(3);
+    const created = await admin.auth(api().post('/api/users')).send({ ...base, email: `${unique('e164')}@timeflow.dev`, phone: `+91 ${digits.slice(0, 5)}-${digits.slice(5)}` });
+    expect(created.status).toBe(201);
+    expect(created.body.data.phone).toBe(`+91${digits}`);
+    const bad = await admin.auth(api().post('/api/users')).send({ ...base, email: `${unique('e164')}@timeflow.dev`, phone: '98765 43210' });
+    expect(bad.status).toBe(400);
+  });
+});

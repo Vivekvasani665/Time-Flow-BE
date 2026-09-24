@@ -88,6 +88,7 @@ export const authService = {
       select: {
         id: true,
         email: true,
+        phone: true,
         passwordHash: true,
         status: true,
         tokenVersion: true,

@@ -30,8 +30,8 @@ export const authController = {
     const input = loginSchema.parse(req.body);
     const result = await authService.login(input, clientInfo(req));
     if ('requiresOtp' in result) {
-      // No cookies yet — nothing authenticates until the emailed code is verified.
-      return ok(res, result, 'OTP sent to your registered email');
+      // No cookies yet — nothing authenticates until the code is verified.
+      return ok(res, result, `OTP sent to your ${channelLabel(result.channels)}`);
     }
     if ('twoFactorRequired' in result) {
       // No cookies yet — the client posts the challenge back with a code.
@@ -53,8 +53,9 @@ export const authController = {
   },
 
   async resendLoginOtp(req: Request, res: Response) {
-    const { verificationId } = resendLoginOtpSchema.parse(req.body);
-    return ok(res, await loginOtpService.resend(verificationId, clientInfo(req)), 'A new code has been sent to your email');
+    const { verificationId, channel } = resendLoginOtpSchema.parse(req.body);
+    const result = await loginOtpService.resend(verificationId, clientInfo(req), channel === 'both' ? undefined : [channel]);
+    return ok(res, result, `A new code has been sent to your ${channelLabel(result.channels)}`);
   },
 
   async loginTwoFactor(req: Request, res: Response) {

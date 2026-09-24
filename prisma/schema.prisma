@@ -275,8 +275,8 @@ model TwoFactorRecoveryCode {
   @@map("two_factor_recovery_codes")
 }
 
-/// Emailed one-time code that must follow the password when LOGIN_OTP_ENABLED
-/// is on. One row per sign-in attempt: its id is the `verificationId` the
+/// One-time code that must follow the password when LOGIN_OTP_ENABLED is on.
+/// The same code goes by email and, if the account has a mobile number, SMS. One row per sign-in attempt: its id is the `verificationId` the
 /// client holds, and a resend rotates the code on the same row.
 model LoginOtp {
   id         String    @id @default(uuid()) @db.Uuid
@@ -289,6 +289,8 @@ model LoginOtp {
   attempts   Int       @default(0)
   sendCount  Int       @default(1) @map("send_count")
   lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  /// Channels the current code was delivered on, e.g. {email,sms}.
+  channels   String[]  @default([]) @db.VarChar(10)
   usedAt     DateTime? @map("used_at") @db.Timestamptz(3)
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 

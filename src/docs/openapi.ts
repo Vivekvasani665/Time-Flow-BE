@@ -225,6 +225,17 @@ export const openApiDocument = {
           requiresOtp: { type: 'boolean', example: true },
           verificationId: uuid,
           email: str({ example: 'v****@gmail.com', description: 'Where the code was sent, masked.' }),
+          phone: nullable(str({ example: '+91******3210', description: 'The account mobile number, masked; null when it has none (email only).' })),
+          channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          emailSent: bool,
+          smsSent: bool,
+          delivery: {
+            type: 'object',
+            description:
+              'Per-channel outcome. A failed channel carries a safe code: EMAIL_DELIVERY_FAILED, INVALID_PHONE_NUMBER, SMS_NOT_CONFIGURED, ' +
+              'SMS_BLOCKED_IN_DEVELOPMENT, SMS_PROVIDER_AUTH_FAILED, SMS_PROVIDER_UNAVAILABLE or SMS_DELIVERY_FAILED.',
+            example: { email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_NOT_CONFIGURED' } },
+          },
           expiresAt: dateTime,
           resendAvailableAt: dateTime,
           expiresInSeconds: { ...int, example: 300 },
@@ -239,11 +250,11 @@ export const openApiDocument = {
           email: str({ example: 's****@company.com', description: 'Where the code was sent, masked.' }),
           phone: str({ example: '+91******3210', description: 'Where the code was sent, masked.' }),
           channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          emailSent: bool,
+          smsSent: bool,
           delivery: {
             type: 'object',
-            description:
-              'Per-channel outcome. A failed channel carries a safe code: EMAIL_SEND_FAILED, SMS_NOT_CONFIGURED, ' +
-              'SMS_BLOCKED_IN_DEVELOPMENT, SMS_PROVIDER_AUTH_FAILED or SMS_SEND_FAILED. The account is still created (201) when one channel works.',
+            description: 'Per-channel outcome with safe failure codes (see LoginOtpChallenge). The account is still created (201) when one channel works.',
             example: { email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_NOT_CONFIGURED' } },
           },
           expiresAt: dateTime,
@@ -663,7 +674,7 @@ export const openApiDocument = {
         description:
           'Replaces the code for this sign-in attempt; the previous one stops working. One resend per 60 seconds, ' +
           'at most 5 codes per sign-in attempt, and 5 requests per 5 minutes per IP.',
-        requestBody: body({ type: 'object', required: ['verificationId'], properties: { verificationId: uuid } }),
+        requestBody: body({ type: 'object', required: ['verificationId'], properties: { verificationId: uuid, channel: enumOf('email', 'sms', 'both') } }),
         responses: {
           '200': success(ref('LoginOtpChallenge')),
           '401': errorResponse('Attempt no longer valid', 'LOGIN_OTP_SESSION_INVALID', 'This sign-in attempt is no longer valid. Please sign in again.'),

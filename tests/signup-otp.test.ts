@@ -132,7 +132,7 @@ describe('Signup with email + SMS OTP', () => {
   });
 
   it('answers 503 and removes the pending user when no channel delivers', async () => {
-    smsFails = 'SMS_SEND_FAILED';
+    smsFails = 'SMS_DELIVERY_FAILED';
     const body = { ...newUser(), email: `${unique('nodeliver')}+fail@example.com` };
     vi.mocked(mailer.sendMail).mockRejectedValueOnce(new Error('smtp down'));
     const res = await register(body);
