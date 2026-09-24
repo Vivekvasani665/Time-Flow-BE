@@ -239,6 +239,13 @@ export const openApiDocument = {
           email: str({ example: 's****@company.com', description: 'Where the code was sent, masked.' }),
           phone: str({ example: '+91******3210', description: 'Where the code was sent, masked.' }),
           channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          delivery: {
+            type: 'object',
+            description:
+              'Per-channel outcome. A failed channel carries a safe code: EMAIL_SEND_FAILED, SMS_NOT_CONFIGURED, ' +
+              'SMS_BLOCKED_IN_DEVELOPMENT, SMS_PROVIDER_AUTH_FAILED or SMS_SEND_FAILED. The account is still created (201) when one channel works.',
+            example: { email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_NOT_CONFIGURED' } },
+          },
           expiresAt: dateTime,
           resendAvailableAt: dateTime,
           expiresInSeconds: { ...int, example: 300 },

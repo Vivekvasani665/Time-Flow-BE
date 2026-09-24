@@ -62,6 +62,8 @@ const EnvSchema = z.object({
   TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
   MSG91_AUTH_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
   MSG91_TEMPLATE_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** 6-letter DLT-registered header, e.g. TMFLOW. Optional when the template already has one. */
+  MSG91_SENDER_ID: z.string().optional().transform((v) => (v ? v : undefined)),
 
   /** How long an administrator-issued password reset link stays usable. Links go to APP_URL/reset-password. */
   RESET_PASSWORD_TOKEN_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
@@ -132,8 +134,16 @@ const EnvSchema = z.object({
 export type Env = z.infer<typeof EnvSchema>;
 
 function loadEnv(): Env {
-  // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name.
-  const parsed = EnvSchema.safeParse({ ...process.env, SMTP_PASS: process.env.SMTP_PASS || process.env.SMTP_PASSWORD });
+  // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name,
+  // and the generic SMS_API_KEY / SMS_TEMPLATE_ID / SMS_SENDER_ID for MSG91's.
+  const e = process.env;
+  const parsed = EnvSchema.safeParse({
+    ...e,
+    SMTP_PASS: e.SMTP_PASS || e.SMTP_PASSWORD,
+    MSG91_AUTH_KEY: e.MSG91_AUTH_KEY || e.SMS_API_KEY,
+    MSG91_TEMPLATE_ID: e.MSG91_TEMPLATE_ID || e.SMS_TEMPLATE_ID,
+    MSG91_SENDER_ID: e.MSG91_SENDER_ID || e.SMS_SENDER_ID,
+  });
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
     // Logger depends on env, so fail fast with plain stderr.

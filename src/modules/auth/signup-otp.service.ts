@@ -5,7 +5,7 @@ import { logger } from '../../lib/logger';
 import { AppError } from '../../common/errors';
 import { fullName } from '../../common/utils/request-context';
 import { sendMail } from '../../queue/mailer';
-import { sendSms } from '../../queue/sms';
+import { SmsError, smsService } from '../../queue/sms';
 import { renderSignupOtpEmail } from '../../queue/templates';
 import { activityService, type ActivityOrigin } from '../activity-logs/activity.service';
 import { maskEmail } from './login-otp.service';
@@ -20,6 +20,13 @@ const SIGNUP_OTP_LIFETIME_MS = 30 * 60 * 1000;
 export type OtpChannel = 'email' | 'sms';
 export const OTP_CHANNELS: readonly OtpChannel[] = ['email', 'sms'];
 
+/**
+ * Per-channel outcome of the latest send. A failure carries a safe code the
+ * client can explain (e.g. SMS_NOT_CONFIGURED) — never the provider's reply.
+ */
+export type ChannelDelivery = { status: 'sent' } | { status: 'failed'; code: string };
+export type OtpDelivery = Partial<Record<OtpChannel, ChannelDelivery>>;
+
 export type SignupOtpChallenge = {
   requiresVerification: true;
   verificationId: string;
@@ -28,6 +35,7 @@ export type SignupOtpChallenge = {
   phone: string;
   /** Channels the current code actually reached. */
   channels: OtpChannel[];
+  delivery: OtpDelivery;
   expiresAt: Date;
   resendAvailableAt: Date;
   /** Relative twins of the two dates, so a client with a wrong clock still counts down correctly. */
@@ -43,8 +51,6 @@ const sessionInvalid = () =>
 const otpExpired = () => new AppError(401, 'SIGNUP_OTP_EXPIRED', 'This code has expired. Request a new one.');
 const tooManyAttempts = () =>
   new AppError(429, 'SIGNUP_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.');
-const deliveryFailed = () =>
-  new AppError(503, 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.');
 
 /** Keyed by a server secret, with the row id mixed in — see login-otp.service for why. */
 let hmacKey: Buffer | null = null;
@@ -71,30 +77,52 @@ export function maskPhone(phone: string): string {
   return `+${digits.slice(0, 2)}${'*'.repeat(digits.length - 6)}${digits.slice(-4)}`;
 }
 
+const failureCode = (channel: OtpChannel, err: unknown) =>
+  err instanceof SmsError ? err.code : channel === 'email' ? 'EMAIL_SEND_FAILED' : 'SMS_SEND_FAILED';
+
 /**
- * Sends the code on each requested channel. Returns the channels that got it;
- * throws only when none did. Never logs or returns the code.
+ * Sends the code on each requested channel and reports each outcome. Throws
+ * only when no channel got it. Never logs or returns the code.
  */
-async function deliver(user: OtpUser, otp: string, channels: readonly OtpChannel[]): Promise<OtpChannel[]> {
+async function deliver(user: OtpUser, otp: string, channels: readonly OtpChannel[]): Promise<{ delivered: OtpChannel[]; delivery: OtpDelivery }> {
   const minutes = env.SIGNUP_OTP_TTL_MINUTES;
-  const send = (channel: OtpChannel) => {
-    if (channel === 'email') return sendMail(renderSignupOtpEmail(user.email, { firstName: user.firstName, code: otp, minutes }));
-    if (!user.phone) return Promise.reject(new Error('user has no mobile number'));
-    return sendSms({
-      to: user.phone,
-      body: `Your TimeFlow verification code is ${otp}. It will expire in ${minutes} minutes. Do not share it with anyone.`,
-      vars: { otp, minutes },
-    });
+  const send = async (channel: OtpChannel): Promise<string> => {
+    if (channel === 'sms') {
+      if (!user.phone) throw new SmsError('SMS_SEND_FAILED', 'user has no mobile number');
+      return smsService.sendOtp(user.phone, otp, minutes);
+    }
+    logger.info({ userId: user.id }, '[EMAIL] signup OTP send started');
+    const messageId = await sendMail(renderSignupOtpEmail(user.email, { firstName: user.firstName, code: otp, minutes }));
+    logger.info({ userId: user.id, messageId }, '[EMAIL] signup OTP accepted by the mail provider');
+    return messageId;
   };
 
   const results = await Promise.allSettled(channels.map(send));
   const delivered: OtpChannel[] = [];
+  const delivery: OtpDelivery = {};
   results.forEach((r, i) => {
-    if (r.status === 'fulfilled') delivered.push(channels[i]);
-    else logger.error({ userId: user.id, channel: channels[i], reason: r.reason instanceof Error ? r.reason.message : String(r.reason) }, 'signup OTP could not be sent');
+    const channel = channels[i];
+    if (r.status === 'fulfilled') {
+      delivered.push(channel);
+      delivery[channel] = { status: 'sent' };
+      return;
+    }
+    const code = failureCode(channel, r.reason);
+    delivery[channel] = { status: 'failed', code };
+    logger.error(
+      { userId: user.id, channel, code, reason: r.reason instanceof Error ? r.reason.message : String(r.reason) },
+      `[${channel === 'sms' ? 'SMS' : 'EMAIL'}] signup OTP could not be sent`,
+    );
   });
-  if (delivered.length === 0) throw deliveryFailed();
-  return delivered;
+  if (delivered.length === 0) {
+    throw new AppError(
+      503,
+      'OTP_DELIVERY_FAILED',
+      'We could not send your verification code. Please try again in a moment.',
+      Object.entries(delivery).map(([path, d]) => ({ path, message: d.status === 'failed' ? d.code : d.status })),
+    );
+  }
+  return { delivered, delivery };
 }
 
 export const signupOtpService = {
@@ -106,7 +134,8 @@ export const signupOtpService = {
     const expiresAt = new Date(now + ttlMs());
 
     await prisma.signupOtp.create({ data: { id, userId: user.id, otpHash: hashOtp(id, otp), expiresAt, lastSentAt: new Date(now) } });
-    const channels = await deliver(user, otp, OTP_CHANNELS);
+    logger.info({ userId: user.id, verificationId: id, expiresAt }, '[OTP] signup OTP generated');
+    const { delivered: channels, delivery } = await deliver(user, otp, OTP_CHANNELS);
     await prisma.signupOtp.update({ where: { id }, data: { channels } });
 
     void activityService.record(origin, {
@@ -122,6 +151,7 @@ export const signupOtpService = {
       email: maskEmail(user.email),
       phone: user.phone ? maskPhone(user.phone) : '',
       channels,
+      delivery,
       expiresAt,
       resendAvailableAt: new Date(now + cooldownMs()),
       ...relativeTimes(),
@@ -212,9 +242,11 @@ export const signupOtpService = {
       throw new AppError(429, 'SIGNUP_OTP_RESEND_COOLDOWN', 'A new code was just sent. Please check your email and phone.');
     }
 
+    logger.info({ userId: row.userId, verificationId: row.id, channels }, '[OTP] signup OTP regenerated for resend');
     let delivered: OtpChannel[];
+    let delivery: OtpDelivery;
     try {
-      delivered = await deliver(row.user, otp, channels);
+      ({ delivered, delivery } = await deliver(row.user, otp, channels));
     } catch (err) {
       // Let the user retry straight away rather than wait out a cooldown for a code that never left.
       await prisma.signupOtp.updateMany({ where: { id: row.id }, data: { lastSentAt: row.lastSentAt } });
@@ -237,6 +269,7 @@ export const signupOtpService = {
       email: maskEmail(row.user.email),
       phone: row.user.phone ? maskPhone(row.user.phone) : '',
       channels: delivered,
+      delivery,
       expiresAt,
       resendAvailableAt: new Date(now + cooldownMs()),
       ...relativeTimes(),

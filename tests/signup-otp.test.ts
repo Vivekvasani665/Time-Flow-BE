@@ -9,18 +9,18 @@ const PASSWORD = 'Signup1234';
 
 let emailedOtp = '';
 let textedOtp = '';
-let smsFails = false;
+let smsFails: sms.SmsFailureCode | null = null;
 
 beforeEach(() => {
   emailedOtp = '';
   textedOtp = '';
-  smsFails = false;
+  smsFails = null;
   vi.spyOn(mailer, 'sendMail').mockImplementation(async (msg) => {
     emailedOtp = /\b(\d{6})\b/.exec(msg.subject)?.[1] ?? '';
     return 'test-msg-id';
   });
-  vi.spyOn(sms, 'sendSms').mockImplementation(async (msg) => {
-    if (smsFails) throw new Error('provider down');
+  vi.spyOn(sms.smsService, 'sendMessage').mockImplementation(async (msg) => {
+    if (smsFails) throw new sms.SmsError(smsFails, 'provider down');
     textedOtp = msg.vars?.otp ?? '';
     return 'test-sms-id';
   });
@@ -40,7 +40,13 @@ describe('Signup with email + SMS OTP', () => {
     const body = newUser();
     const res = await register(body);
     expect(res.status).toBe(201);
-    expect(res.body.data).toMatchObject({ requiresVerification: true, channels: ['email', 'sms'], expiresInSeconds: 300 });
+    expect(res.body.data).toMatchObject({
+      requiresVerification: true,
+      channels: ['email', 'sms'],
+      delivery: { email: { status: 'sent' }, sms: { status: 'sent' } },
+      expiresInSeconds: 300,
+    });
+    expect(JSON.stringify(res.body)).not.toContain(emailedOtp);
     expect(res.body.data.phone).toMatch(/^\+91\*+\d{4}$/);
     expect(res.headers['set-cookie']).toBeUndefined();
 
@@ -114,11 +120,37 @@ describe('Signup with email + SMS OTP', () => {
     expect((await verify(id, textedOtp)).status).toBe(200);
   });
 
-  it('still succeeds when only one channel delivers, and reports which', async () => {
-    smsFails = true;
+  it('still creates the account (201) when only email delivers, and says why SMS failed', async () => {
+    smsFails = 'SMS_PROVIDER_AUTH_FAILED';
     const res = await register(newUser());
     expect(res.status).toBe(201);
     expect(res.body.data.channels).toEqual(['email']);
+    expect(res.body.data.delivery).toEqual({ email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_PROVIDER_AUTH_FAILED' } });
+    expect(res.body.message).toBe('Verification code sent to your email');
+    // The emailed code still verifies the account.
+    expect((await verify(res.body.data.verificationId, emailedOtp)).status).toBe(200);
+  });
+
+  it('answers 503 and removes the pending user when no channel delivers', async () => {
+    smsFails = 'SMS_SEND_FAILED';
+    const body = { ...newUser(), email: `${unique('nodeliver')}+fail@example.com` };
+    vi.mocked(mailer.sendMail).mockRejectedValueOnce(new Error('smtp down'));
+    const res = await register(body);
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('OTP_DELIVERY_FAILED');
+    expect(await prisma.user.count({ where: { email: body.email } })).toBe(0);
+  });
+
+  it('resends on email only', async () => {
+    const res = await register(newUser());
+    const id = res.body.data.verificationId;
+    await prisma.signupOtp.update({ where: { id }, data: { lastSentAt: new Date(Date.now() - 60_000) } });
+    textedOtp = '';
+    const again = await resend(id, 'email');
+    expect(again.status).toBe(200);
+    expect(again.body.data).toMatchObject({ channels: ['email'], delivery: { email: { status: 'sent' } } });
+    expect(textedOtp).toBe('');
+    expect((await verify(id, emailedOtp)).status).toBe(200);
   });
 
   it('refuses a taken email or mobile number, but replaces an unverified signup', async () => {

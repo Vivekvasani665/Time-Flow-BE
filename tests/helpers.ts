@@ -55,7 +55,7 @@ export const uniquePhone = () => `+9198${String(Date.now() % 10_000).padStart(4,
 /** Runs `fn` while capturing the code texted by the signup flow (the same code is emailed). */
 export async function captureSmsOtp<T>(fn: () => Promise<T>): Promise<{ result: T; otp: string }> {
   let otp = '';
-  const spy = vi.spyOn(sms, 'sendSms').mockImplementation(async (msg) => {
+  const spy = vi.spyOn(sms.smsService, 'sendMessage').mockImplementation(async (msg) => {
     otp = msg.vars?.otp ?? '';
     return 'test-sms-id';
   });
