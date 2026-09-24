@@ -62,7 +62,18 @@ async function twilio(message: SmsMessage): Promise<string> {
     headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: form,
   });
-  if (status >= 300) throw providerFailure('twilio', status, `${data.code ?? ''} ${data.message ?? 'no detail'}`.trim());
+  if (status >= 300) {
+    // The usual trial-account failures, spelled out for whoever reads the log.
+    const hints: Record<number, string> = {
+      21608: 'trial account: verify this recipient in Twilio Console → Phone Numbers → Verified Caller IDs, or upgrade the account',
+      21606: 'TWILIO_FROM is not an SMS-capable number on this account',
+      21659: 'TWILIO_FROM is not a Twilio number on this account',
+      21211: 'the recipient number is not valid',
+      21408: 'SMS to this country is not enabled — Twilio Console → Messaging → Settings → Geo permissions',
+    };
+    const hint = hints[Number(data.code)];
+    throw providerFailure('twilio', status, `${data.code ?? ''} ${data.message ?? 'no detail'}${hint ? ` — ${hint}` : ''}`.trim());
+  }
   logger.info({ provider: 'twilio', httpStatus: status, messageId: data.sid, providerStatus: data.status }, '[SMS] provider response: accepted');
   return String(data.sid ?? 'twilio');
 }
