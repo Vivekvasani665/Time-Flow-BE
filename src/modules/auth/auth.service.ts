@@ -14,6 +14,8 @@ import { producers } from '../../queue/producers';
 import { tokenService } from './token.service';
 import { twoFactorService } from './two-factor.service';
 import { loginOtpService, type LoginOtpChallenge } from './login-otp.service';
+import { signupOtpService, type SignupOtpChallenge } from './signup-otp.service';
+import { userRepository } from '../users/user.repository';
 import type { LoginInput, RegisterInput } from './auth.schemas';
 
 /** Role given to everyone who signs up themselves; admins can promote them later. */
@@ -78,8 +80,11 @@ async function issueSession(
 
 export const authService = {
   async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge | LoginOtpChallenge> {
+    const identifier = input.email ?? input.phone ?? '';
+    // A phone number is resolved to its account first; a miss still runs the password check below, so timing does not reveal it.
+    const phoneUserId = input.phone ? await userRepository.findIdByPhone(input.phone) : null;
     const user = await prisma.user.findFirst({
-      where: { email: input.email, deletedAt: null },
+      where: input.phone ? { id: phoneUserId ?? '00000000-0000-0000-0000-000000000000', deletedAt: null } : { email: input.email, deletedAt: null },
       select: {
         id: true,
         email: true,
@@ -100,10 +105,13 @@ export const authService = {
         action: 'auth.login_failed',
         entity: 'auth',
         entityId: user?.id ?? null,
-        description: `Failed login attempt for ${input.email}`,
-        metadata: { email: input.email },
+        description: `Failed login attempt for ${identifier}`,
+        metadata: input.phone ? { phone: input.phone } : { email: input.email },
       });
-      throw new UnauthorizedError('Invalid email or password', 'INVALID_CREDENTIALS');
+      throw new UnauthorizedError(input.phone ? 'Invalid mobile number or password' : 'Invalid email or password', 'INVALID_CREDENTIALS');
+    }
+    if (user.status === 'PENDING') {
+      throw new ForbiddenError('Your account is not verified yet. Enter the code we sent to your email and mobile number, or sign up again to get a new one.', 'ACCOUNT_NOT_VERIFIED');
     }
     if (user.status !== 'ACTIVE') {
       throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
@@ -198,44 +206,76 @@ export const authService = {
     return { ...session, method };
   },
 
-  /** Self-service sign-up: creates an active user with the default role and signs them in. */
-  async register(input: RegisterInput, client: ClientInfo): Promise<IssuedSession> {
+  /**
+   * Self-service sign-up, step 1: creates a PENDING user with the default role
+   * and sends one code to its email and mobile number. No session is issued —
+   * the account can sign in only after verifySignup.
+   */
+  async register(input: RegisterInput, client: ClientInfo): Promise<SignupOtpChallenge> {
     const role = await prisma.role.findUnique({ where: { name: SIGNUP_ROLE }, select: { id: true } });
     if (!role) {
       logger.error({ role: SIGNUP_ROLE }, 'sign-up role is missing; run the seed');
       throw new ForbiddenError('Sign-up is not available right now', 'SIGNUP_UNAVAILABLE');
     }
-    const taken = await prisma.user.count({ where: { email: input.email, deletedAt: null } });
-    if (taken > 0) throw new ConflictError('An account with this email already exists', 'USER_EMAIL_EXISTS');
+    // An unverified (PENDING) signup does not own its email or number: signing
+    // up again replaces it, so an abandoned attempt never locks anyone out.
+    const emailTaken = await prisma.user.count({ where: { email: input.email, deletedAt: null, status: { not: 'PENDING' } } });
+    if (emailTaken > 0) throw new ConflictError('An account with this email already exists', 'USER_EMAIL_EXISTS');
+    if (await userRepository.phoneTaken(input.phone, { ignorePending: true })) {
+      throw new ConflictError('An account with this mobile number already exists', 'USER_PHONE_EXISTS');
+    }
 
-    // Explicit field whitelist — request bodies are never spread into Prisma.
-    const user = await prisma.user.create({
-      data: {
-        firstName: input.firstName,
-        lastName: input.lastName,
-        email: input.email,
-        status: 'ACTIVE',
-        roleId: role.id,
-        passwordHash: await hashPassword(input.password),
-        lastLoginAt: new Date(),
-      },
-      select: { id: true, email: true, firstName: true, lastName: true, tokenVersion: true },
+    const digits = input.phone.replace(/\D/g, '');
+    const passwordHash = await hashPassword(input.password);
+    const user = await prisma.$transaction(async (tx) => {
+      const stale = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM users
+        WHERE deleted_at IS NULL AND status = 'PENDING'
+          AND (email = ${input.email} OR regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = ${digits})`;
+      if (stale.length > 0) await tx.user.deleteMany({ where: { id: { in: stale.map((r) => r.id) }, status: 'PENDING' } });
+
+      // Explicit field whitelist — request bodies are never spread into Prisma.
+      return tx.user.create({
+        data: {
+          firstName: input.firstName,
+          lastName: input.lastName,
+          email: input.email,
+          phone: input.phone,
+          status: 'PENDING',
+          roleId: role.id,
+          passwordHash,
+        },
+        select: { id: true, email: true, phone: true, firstName: true, lastName: true },
+      });
     });
 
-    const session = await issueSession(user, client);
+    const origin: ActivityOrigin = { actorId: user.id, ...client };
+    let challenge: SignupOtpChallenge;
+    try {
+      challenge = await signupOtpService.start(user, origin);
+    } catch (err) {
+      // No code reached the user, so the account could never be verified.
+      await prisma.user.deleteMany({ where: { id: user.id, status: 'PENDING' } });
+      throw err;
+    }
+
+    void activityService.record(origin, {
+      action: 'user.registered',
+      entity: 'user',
+      entityId: user.id,
+      description: `${fullName(user)} signed up`,
+      metadata: { email: user.email, role: SIGNUP_ROLE, status: 'PENDING' },
+    });
+    return challenge;
+  },
+
+  /** Self-service sign-up, step 2: the code activates the account. The user then signs in normally. */
+  async verifySignup(verificationId: string, otp: string, client: ClientInfo): Promise<{ id: string; email: string }> {
+    const userId = await signupOtpService.verify(verificationId, otp, client);
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { id: true, email: true, firstName: true } });
     await cache.invalidate('dashboard');
-    void producers.welcomeEmail({ id: user.id, email: user.email, firstName: user.firstName }, user.id);
-    void activityService.record(
-      { actorId: user.id, ...client },
-      {
-        action: 'user.registered',
-        entity: 'user',
-        entityId: user.id,
-        description: `${fullName(user)} signed up`,
-        metadata: { email: user.email, role: SIGNUP_ROLE },
-      },
-    );
-    return session;
+    void producers.welcomeEmail(user, user.id);
+    return { id: user.id, email: user.email };
   },
 
   /**

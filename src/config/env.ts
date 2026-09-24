@@ -42,6 +42,27 @@ const EnvSchema = z.object({
   LOGIN_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
   LOGIN_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(60),
 
+  /** Self-registration: one code, sent to both the email address and the mobile number. */
+  SIGNUP_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+  SIGNUP_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(30),
+
+  /**
+   * Outgoing SMS transport for signup codes:
+   *   log    — write the message to the server log instead of sending (development)
+   *   twilio — Twilio Messages API; needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
+   *   msg91  — MSG91 Flow API; needs MSG91_AUTH_KEY and a DLT-approved MSG91_TEMPLATE_ID
+   *            whose variables are ##otp## and ##minutes##
+   */
+  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91']).default('log')),
+  /** Same safety catch as EMAIL_ALLOW_REAL_SEND: outside production a real provider is refused unless set. */
+  SMS_ALLOW_REAL_SEND: bool.default(false),
+  TWILIO_ACCOUNT_SID: z.string().optional().transform((v) => (v ? v : undefined)),
+  TWILIO_AUTH_TOKEN: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). */
+  TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
+  MSG91_AUTH_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  MSG91_TEMPLATE_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+
   /** How long an administrator-issued password reset link stays usable. Links go to APP_URL/reset-password. */
   RESET_PASSWORD_TOKEN_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
 
@@ -142,6 +163,7 @@ export function productionWarnings(): string[] {
   if (env.LOGIN_OTP_ENABLED && (env.EMAIL_PROVIDER ?? (env.SMTP_HOST ? 'smtp' : 'log')) === 'log') {
     warnings.push('LOGIN_OTP_ENABLED is true but no mail provider is configured — sign-in codes cannot be delivered, so nobody can sign in unless a mail account is set up in System → Email delivery.');
   }
+  if (env.SMS_PROVIDER === 'log') warnings.push('SMS_PROVIDER is log — signup codes are written to the server log instead of being texted.');
   if (env.EMAIL_FAILURE_RATE > 0) warnings.push(`EMAIL_FAILURE_RATE is ${env.EMAIL_FAILURE_RATE} — real emails will be failed on purpose.`);
   return warnings;
 }

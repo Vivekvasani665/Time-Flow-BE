@@ -222,6 +222,24 @@ export function renderLoginOtpEmail(to: string, vars: { firstName: string; code:
   };
 }
 
+/** Sent directly, like the sign-in code, so the code never lands in email_logs. */
+export function renderSignupOtpEmail(to: string, vars: { firstName: string; code: string; minutes: number }): MailMessage {
+  const l: Layout = {
+    kicker: 'Account verification',
+    heading: 'Verify your TimeFlow account',
+    intro: `Hi ${vars.firstName || 'there'}, use this code to finish creating your TimeFlow account. The same code was also sent to your mobile number.`,
+    code: vars.code,
+    rows: [{ label: 'Expires in', value: `${vars.minutes} minutes` }],
+    footer: 'Never share this code — TimeFlow staff will never ask for it. If you did not sign up for TimeFlow, you can ignore this email.',
+  };
+  return {
+    to,
+    subject: `${vars.code} is your TimeFlow verification code`,
+    html: layout(l),
+    text: [plain({ ...l, salutation: `Hi ${vars.firstName || 'there'},` }), l.footer].join('\n\n'),
+  };
+}
+
 /**
  * Sent directly rather than through the queue: the queue keeps a copy of every
  * message in email_logs, and a live reset link must never be stored in clear.

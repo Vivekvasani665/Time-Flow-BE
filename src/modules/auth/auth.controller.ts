@@ -7,15 +7,21 @@ import {
   disableTwoFactorSchema,
   loginSchema,
   resendLoginOtpSchema,
+  resendSignupOtpSchema,
   registerSchema,
   twoFactorCodeSchema,
   twoFactorLoginSchema,
   updatePreferencesSchema,
   verifyLoginOtpSchema,
+  verifySignupOtpSchema,
 } from './auth.schemas';
 import { authService } from './auth.service';
 import { twoFactorService } from './two-factor.service';
 import { loginOtpService } from './login-otp.service';
+import { OTP_CHANNELS, signupOtpService, type OtpChannel } from './signup-otp.service';
+
+const channelLabel = (channels: OtpChannel[]) =>
+  channels.length === 2 ? 'email and mobile number' : channels[0] === 'sms' ? 'mobile number' : 'email';
 
 const clientInfo = (req: Request) => ({ ip: req.ip ?? null, userAgent: req.get('user-agent')?.slice(0, 255) ?? null });
 
@@ -62,10 +68,22 @@ export const authController = {
 
   async register(req: Request, res: Response) {
     const input = registerSchema.parse(req.body);
-    const session = await authService.register(input, clientInfo(req));
-    tokenService.setAuthCookies(res, session.accessToken, session.refreshToken, session.refreshExpiresAt);
-    const user = await authService.getAuthUser(session.userId);
-    return created(res, { user, accessToken: session.accessToken }, 'Account created');
+    // No cookies — the account stays PENDING until the code is verified.
+    const challenge = await authService.register(input, clientInfo(req));
+    return created(res, challenge, `Verification code sent to your ${channelLabel(challenge.channels)}`);
+  },
+
+  async verifySignupOtp(req: Request, res: Response) {
+    const { verificationId, otp } = verifySignupOtpSchema.parse(req.body);
+    const user = await authService.verifySignup(verificationId, otp, clientInfo(req));
+    return ok(res, { verified: true, user }, 'Account verified. You can now sign in.');
+  },
+
+  async resendSignupOtp(req: Request, res: Response) {
+    const { verificationId, channel } = resendSignupOtpSchema.parse(req.body);
+    const channels = channel === 'both' ? OTP_CHANNELS : [channel];
+    const result = await signupOtpService.resend(verificationId, channels, clientInfo(req));
+    return ok(res, result, `A new code has been sent to your ${channelLabel(result.channels)}`);
   },
 
   async refresh(req: Request, res: Response) {

@@ -128,6 +128,8 @@ const priority = enumOf('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
 const projectStatus = enumOf('PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'ARCHIVED');
 const taskStatus = enumOf('TODO', 'IN_PROGRESS', 'REVIEW', 'COMPLETED');
 const userStatus = enumOf('ACTIVE', 'INACTIVE');
+/** PENDING = signed up, sign-up code not verified yet. Readable and filterable, never settable. */
+const userStatusAny = enumOf('ACTIVE', 'INACTIVE', 'PENDING');
 
 export const openApiDocument = {
   openapi: '3.0.3',
@@ -201,7 +203,7 @@ export const openApiDocument = {
           email: str(),
           phone: nullable(str()),
           avatarUrl: nullable(str()),
-          status: userStatus,
+          status: userStatusAny,
           role: ref('RoleRef'),
           permissions: arrayOf(str({ example: 'users.view' })),
           twoFactorEnabled: bool,
@@ -227,6 +229,20 @@ export const openApiDocument = {
           resendAvailableAt: dateTime,
           expiresInSeconds: { ...int, example: 300 },
           resendAvailableInSeconds: { ...int, example: 60 },
+        },
+      },
+      SignupOtpChallenge: {
+        type: 'object',
+        properties: {
+          requiresVerification: { type: 'boolean', example: true },
+          verificationId: uuid,
+          email: str({ example: 's****@company.com', description: 'Where the code was sent, masked.' }),
+          phone: str({ example: '+91******3210', description: 'Where the code was sent, masked.' }),
+          channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          expiresAt: dateTime,
+          resendAvailableAt: dateTime,
+          expiresInSeconds: { ...int, example: 300 },
+          resendAvailableInSeconds: { ...int, example: 30 },
         },
       },
       PasswordResetRequest: {
@@ -707,23 +723,62 @@ export const openApiDocument = {
     '/api/auth/register': {
       post: {
         tags: ['Auth'],
-        summary: 'Sign up',
+        summary: 'Sign up (step 1 of 2)',
         description:
-          'Creates an active account with the **Employee** role and signs it in. Rate limited like login. Sets `tf_access` and `tf_refresh` httpOnly cookies.',
+          'Creates a **PENDING** account with the **Employee** role and sends one 6-digit code to the email address and, by SMS, ' +
+          'to the mobile number. No session and no cookies: verify the code with `/api/auth/register/verify-otp`, then sign in. ' +
+          'Signing up again with the email or number of an unverified account replaces that account. Rate limited like login.',
         requestBody: body({
           type: 'object',
-          required: ['firstName', 'lastName', 'email', 'password'],
+          required: ['firstName', 'lastName', 'email', 'phone', 'password'],
           properties: {
             firstName: str({ example: 'Sam' }),
             lastName: str({ example: 'Rivera' }),
             email: str({ example: 'sam@company.com' }),
+            phone: str({ example: '+919876543210', description: 'With country code. Spaces and dashes are ignored.' }),
             password: str({ example: 'Signup1234', description: 'At least 8 characters, with a letter and a number' }),
           },
         }),
         responses: {
-          '201': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
-          '409': errorResponse('Email taken', 'USER_EMAIL_EXISTS', 'An account with this email already exists'),
+          '201': success(ref('SignupOtpChallenge')),
+          '409': errorResponse('Email or mobile number taken', 'USER_EMAIL_EXISTS', 'An account with this email already exists'),
+          '503': errorResponse('Code could not be sent', 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
           ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/register/verify-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Verify sign-up code (step 2 of 2)',
+        description: 'Activates the account. The same code was sent by email and SMS; either copy works. 5 wrong codes per code, 10 requests per minute per IP.',
+        requestBody: body({ type: 'object', required: ['verificationId', 'otp'], properties: { verificationId: uuid, otp: str({ example: '482913' }) } }),
+        responses: {
+          '200': success({ type: 'object', properties: { verified: bool, user: { type: 'object', properties: { id: uuid, email: str() } } } }),
+          '400': errorResponse('Wrong code', 'SIGNUP_OTP_INVALID', 'Incorrect code. 4 attempts left.'),
+          '401': errorResponse('Code expired or verification no longer valid', 'SIGNUP_OTP_EXPIRED', 'This code has expired. Request a new one.'),
+          '429': errorResponse('Too many wrong codes', 'SIGNUP_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
+        },
+      },
+    },
+    '/api/auth/register/resend-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Resend sign-up code',
+        description:
+          'Replaces the code; the previous one stops working. `channel` is `email`, `sms` or `both` (default). ' +
+          'One resend per 30 seconds, at most 5 codes per sign-up, and 5 requests per 5 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['verificationId'],
+          properties: { verificationId: uuid, channel: enumOf('email', 'sms', 'both') },
+        }),
+        responses: {
+          '200': success(ref('SignupOtpChallenge')),
+          '401': errorResponse('Verification no longer valid', 'SIGNUP_OTP_SESSION_INVALID', 'This verification is no longer valid. Please sign up again.'),
+          '429': errorResponse('Cooldown', 'SIGNUP_OTP_RESEND_COOLDOWN', 'Please wait 12 seconds before requesting a new code.'),
+          '503': errorResponse('Code could not be sent', 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
+          ...errors(400),
         },
       },
     },
@@ -748,7 +803,7 @@ export const openApiDocument = {
       entity: 'User',
       perms: 'users',
       sortable: ['createdAt', 'firstName', 'lastName', 'email', 'status', 'lastLoginAt'],
-      filters: [q('status', userStatus), q('roleId', uuid)],
+      filters: [q('status', userStatusAny), q('roleId', uuid)],
       create: 'CreateUser',
       update: 'UpdateUser',
       listNote: '`search` matches name, email and phone.',

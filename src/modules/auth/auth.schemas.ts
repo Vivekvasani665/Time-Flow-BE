@@ -1,12 +1,29 @@
 import { z } from 'zod';
 import { emailSchema, passwordSchema, trimmed } from '../../common/utils/validation';
 
+/**
+ * Mobile number in international form, country code included: `+919876543210`.
+ * Spaces, dashes and brackets are dropped, so `+91 98765-43210` is accepted too.
+ */
+export const mobileSchema = z
+  .string({ message: 'Mobile number is required' })
+  .trim()
+  .min(1, 'Mobile number is required')
+  .transform((v) => v.replace(/[\s()-]/g, ''))
+  .pipe(z.string().regex(/^\+[1-9]\d{7,14}$/, 'Enter the mobile number with its country code, e.g. +919876543210'));
+
+/** Sign in with either the email or the mobile number on the account — exactly one of them. */
 export const loginSchema = z
   .object({
-    email: emailSchema,
+    email: emailSchema.optional(),
+    phone: mobileSchema.optional(),
     password: z.string({ message: 'Password is required' }).min(1, 'Password is required').max(128),
   })
-  .strict();
+  .strict()
+  .refine((v) => (v.email === undefined) !== (v.phone === undefined), {
+    message: 'Enter your email or mobile number',
+    path: ['email'],
+  });
 
 export type LoginInput = z.infer<typeof loginSchema>;
 
@@ -47,7 +64,25 @@ export const registerSchema = z
     firstName: trimmed(1, 80, 'First name'),
     lastName: trimmed(1, 80, 'Last name'),
     email: emailSchema,
+    phone: mobileSchema,
     password: passwordSchema,
+  })
+  .strict();
+
+const otpCode = z
+  .string({ message: 'Code is required' })
+  .trim()
+  .regex(/^\d{6}$/, 'Enter the 6-digit code');
+
+export const verifySignupOtpSchema = z
+  .object({ verificationId: z.uuid({ message: 'Invalid verification id' }), otp: otpCode })
+  .strict();
+
+/** `both` (the default) re-sends to email and SMS; the chart's two links send `email` or `sms`. */
+export const resendSignupOtpSchema = z
+  .object({
+    verificationId: z.uuid({ message: 'Invalid verification id' }),
+    channel: z.enum(['email', 'sms', 'both'], { message: 'Channel must be email, sms or both' }).default('both'),
   })
   .strict();
 

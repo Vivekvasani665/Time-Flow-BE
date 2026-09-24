@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { prisma } from '../src/lib/prisma';
 import * as mailer from '../src/queue/mailer';
-import { api, loginAs, nextIp, unique } from './helpers';
+import { api, loginAs, nextIp, signUpAndLogin, unique } from './helpers';
 
 const OLD_PASSWORD = 'OldPassword123';
 const NEW_PASSWORD = 'NewPassword123!';
@@ -19,11 +19,7 @@ beforeEach(() => {
 
 async function newMember() {
   const email = `${unique('reset')}@example.com`;
-  const res = await api()
-    .post('/api/auth/register')
-    .set('X-Forwarded-For', nextIp())
-    .send({ firstName: 'Rhea', lastName: 'Set', email, password: OLD_PASSWORD });
-  expect(res.status).toBe(201);
+  const res = await signUpAndLogin({ firstName: 'Rhea', lastName: 'Set', email, password: OLD_PASSWORD });
   return { email, id: res.body.data.user.id as string, token: res.body.data.accessToken as string };
 }
 

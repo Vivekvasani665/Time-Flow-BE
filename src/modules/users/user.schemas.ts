@@ -3,6 +3,8 @@ import { listQuerySchema } from '../../common/http/pagination';
 import { emailSchema, passwordSchema, trimmed } from '../../common/utils/validation';
 
 const status = z.enum(['ACTIVE', 'INACTIVE'], { message: 'Status must be ACTIVE or INACTIVE' });
+/** PENDING (awaiting signup verification) can be filtered on, but only a signup OTP sets it. */
+const listStatus = z.enum(['ACTIVE', 'INACTIVE', 'PENDING'], { message: 'Status must be ACTIVE, INACTIVE or PENDING' });
 
 const phone = z
   .string()
@@ -55,7 +57,7 @@ export const listUsersQuerySchema = listQuerySchema(
   ['createdAt', 'firstName', 'lastName', 'email', 'status', 'lastLoginAt'] as const,
   'createdAt',
 ).extend({
-  status: status.optional(),
+  status: listStatus.optional(),
   roleId: z.uuid().optional(),
 });
 

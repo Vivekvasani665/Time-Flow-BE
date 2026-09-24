@@ -41,6 +41,22 @@ const loginOtpResendLimiter = rateLimit({
   message: 'Too many code requests. Please wait a few minutes and try again.',
 });
 
+// Same shape of guard for the signup code: guessing is also capped per code
+// (5 wrong attempts), and resends by a per-signup cooldown.
+const signupOtpVerifyLimiter = rateLimit({
+  name: 'signup-otp-verify',
+  limit: 10,
+  windowSeconds: 60,
+  message: 'Too many code attempts. Please wait a minute and try again.',
+});
+
+const signupOtpResendLimiter = rateLimit({
+  name: 'signup-otp-resend',
+  limit: 5,
+  windowSeconds: 5 * 60,
+  message: 'Too many code requests. Please wait a few minutes and try again.',
+});
+
 const refreshLimiter = rateLimit({ name: 'refresh', limit: 30, windowSeconds: 60 });
 
 export const authRouter = Router();
@@ -52,6 +68,8 @@ authRouter.post('/login/otp/verify', loginOtpVerifyLimiter, authController.verif
 authRouter.post('/resend-login-otp', loginOtpResendLimiter, authController.resendLoginOtp);
 authRouter.post('/login/otp/resend', loginOtpResendLimiter, authController.resendLoginOtp);
 authRouter.post('/register', registerLimiter, authController.register);
+authRouter.post('/register/verify-otp', signupOtpVerifyLimiter, authController.verifySignupOtp);
+authRouter.post('/register/resend-otp', signupOtpResendLimiter, authController.resendSignupOtp);
 authRouter.post('/refresh', refreshLimiter, authController.refresh);
 authRouter.post('/logout', authController.logout);
 authRouter.get('/me', authenticate, authController.me);

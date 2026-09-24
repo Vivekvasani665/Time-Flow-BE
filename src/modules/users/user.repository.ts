@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { skipTake } from '../../common/http/pagination';
 import type { ListUsersQuery } from './user.schemas';
@@ -59,6 +59,32 @@ export const userRepository = {
     return prisma.user
       .count({ where: { email, deletedAt: null, ...(excludeId ? { id: { not: excludeId } } : {}) } })
       .then((n) => n > 0);
+  },
+
+  /** Compared on digits only, matching the `users_phone_active_key` index. */
+  /** Matches on digits only, so `+91 98765-43210` finds `+919876543210`. Unverified signups are skipped. */
+  async findIdByPhone(phone: string): Promise<string | null> {
+    const digits = phone.replace(/\D/g, '');
+    if (!digits) return null;
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM users
+      WHERE deleted_at IS NULL AND phone IS NOT NULL
+        AND regexp_replace(phone, '[^0-9]', '', 'g') = ${digits}
+      ORDER BY (status = 'PENDING') ASC
+      LIMIT 1`;
+    return rows[0]?.id ?? null;
+  },
+
+  async phoneTaken(phone: string, opts: { excludeId?: string; ignorePending?: boolean } = {}) {
+    const digits = phone.replace(/\D/g, '');
+    if (!digits) return false;
+    const rows = await prisma.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM users
+      WHERE deleted_at IS NULL AND phone IS NOT NULL
+        AND regexp_replace(phone, '[^0-9]', '', 'g') = ${digits}
+        ${opts.excludeId ? Prisma.sql`AND id <> ${opts.excludeId}::uuid` : Prisma.empty}
+        ${opts.ignorePending ? Prisma.sql`AND status <> 'PENDING'` : Prisma.empty}`;
+    return (rows[0]?.n ?? 0) > 0;
   },
 
   async stats(userId: string) {

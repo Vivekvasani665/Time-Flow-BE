@@ -15,6 +15,8 @@ datasource db {
 enum UserStatus {
   ACTIVE
   INACTIVE
+  /// Self-registered, but the signup OTP has not been verified yet. Cannot sign in.
+  PENDING
 }
 
 enum ProjectStatus {
@@ -59,6 +61,8 @@ model User {
   /// Always stored lower-cased. Uniqueness among non-deleted users is enforced
   /// by the partial unique index `users_email_active_key` (see migration SQL).
   email        String     @db.VarChar(254)
+  /// Digits-only uniqueness among non-deleted users is enforced by the partial
+  /// expression index `users_phone_active_key` (see migration SQL).
   phone        String?    @db.VarChar(32)
   passwordHash String     @map("password_hash")
   avatarUrl    String?    @map("avatar_url")
@@ -95,6 +99,7 @@ model User {
   refreshTokens   RefreshToken[]
   recoveryCodes   TwoFactorRecoveryCode[]
   loginOtps       LoginOtp[]
+  signupOtps      SignupOtp[]
   emailsReceived  EmailLog[]              @relation("EmailsReceived")
   emailsSent      EmailLog[]              @relation("EmailsSent")
   passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
@@ -292,6 +297,32 @@ model LoginOtp {
   @@index([userId])
   @@index([expiresAt])
   @@map("login_otps")
+}
+
+/// One-time code that activates a self-registered (PENDING) account. The same
+/// code goes to the email address and the mobile number; its id is the
+/// `verificationId` the client holds, and a resend rotates the code on the
+/// same row.
+model SignupOtp {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// HMAC-SHA256 of the code, keyed by a server secret (see signup-otp.service).
+  otpHash    String    @map("otp_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Wrong guesses against the current code; reset when a new code is sent.
+  attempts   Int       @default(0)
+  sendCount  Int       @default(1) @map("send_count")
+  lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  /// Channels the current code was delivered on, e.g. {email,sms}.
+  channels   String[]  @default([]) @db.VarChar(10)
+  verifiedAt DateTime? @map("verified_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("signup_otps")
 }
 
 enum PasswordResetStatus {

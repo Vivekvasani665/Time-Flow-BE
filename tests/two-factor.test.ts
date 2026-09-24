@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { base32Encode, generateTotp, totpStep, verifyTotp } from '../src/common/utils/totp';
-import { api, loginAs, nextIp, unique } from './helpers';
+import { api, loginAs, nextIp, signUpAndLogin, unique } from './helpers';
 
 const PASSWORD = 'TwoFactor123';
 
@@ -16,11 +16,7 @@ const code = (secret: string, offset = 0) => generateTotp(secret, totpStep() + o
 
 async function newUser() {
   const email = `${unique('tfa')}@example.com`;
-  const res = await api()
-    .post('/api/auth/register')
-    .set('X-Forwarded-For', nextIp())
-    .send({ firstName: 'Tess', lastName: 'Factor', email, password: PASSWORD });
-  expect(res.status).toBe(201);
+  const res = await signUpAndLogin({ firstName: 'Tess', lastName: 'Factor', email, password: PASSWORD });
   const token: string = res.body.data.accessToken;
   return { email, userId: res.body.data.user.id as string, auth: (r: ReturnType<ReturnType<typeof api>['get']>) => r.set('Authorization', `Bearer ${token}`) };
 }

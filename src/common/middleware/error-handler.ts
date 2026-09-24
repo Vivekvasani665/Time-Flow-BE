@@ -27,6 +27,7 @@ function zodToDetails(err: ZodError): ErrorDetail[] {
 function mapUniqueViolation(err: Prisma.PrismaClientKnownRequestError): AppError {
   const target = JSON.stringify(err.meta?.target ?? '');
   const model = String(err.meta?.modelName ?? '');
+  if (target.includes('phone')) return new ConflictError('An account with this mobile number already exists', 'USER_PHONE_EXISTS');
   if (target.includes('email') || (model === 'User' && target.includes('users_email'))) {
     return new ConflictError('Email already exists', 'USER_EMAIL_EXISTS');
   }

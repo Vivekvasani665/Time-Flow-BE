@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { vi } from 'vitest';
+import * as sms from '../src/queue/sms';
 import { createApp } from '../src/app';
 import { prisma } from '../src/lib/prisma';
 
@@ -45,3 +47,37 @@ export async function userId(email: string): Promise<string> {
 
 let seq = 0;
 export const unique = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${++seq}`;
+
+let phoneSeq = Math.floor(Math.random() * 1_000_000);
+/** A mobile number no other test user has. */
+export const uniquePhone = () => `+9198${String(Date.now() % 10_000).padStart(4, '0')}${String(++phoneSeq % 10_000).padStart(4, '0')}`;
+
+/** Runs `fn` while capturing the code texted by the signup flow (the same code is emailed). */
+export async function captureSmsOtp<T>(fn: () => Promise<T>): Promise<{ result: T; otp: string }> {
+  let otp = '';
+  const spy = vi.spyOn(sms, 'sendSms').mockImplementation(async (msg) => {
+    otp = msg.vars?.otp ?? '';
+    return 'test-sms-id';
+  });
+  try {
+    return { result: await fn(), otp };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/** Full self-service signup: register → verify the code → sign in. */
+export async function signUpAndLogin(body: { firstName: string; lastName: string; email: string; password: string; phone?: string }) {
+  const { result: reg, otp } = await captureSmsOtp(() =>
+    request(app).post('/api/auth/register').set('X-Forwarded-For', nextIp()).send({ phone: uniquePhone(), ...body }),
+  );
+  if (reg.status !== 201) throw new Error(`register failed: ${reg.status} ${JSON.stringify(reg.body)}`);
+  const verified = await request(app)
+    .post('/api/auth/register/verify-otp')
+    .set('X-Forwarded-For', nextIp())
+    .send({ verificationId: reg.body.data.verificationId, otp });
+  if (verified.status !== 200) throw new Error(`verify failed: ${verified.status} ${JSON.stringify(verified.body)}`);
+  const login = await request(app).post('/api/auth/login').set('X-Forwarded-For', nextIp()).send({ email: body.email, password: body.password });
+  if (login.status !== 200) throw new Error(`login failed: ${login.status} ${JSON.stringify(login.body)}`);
+  return login;
+}
