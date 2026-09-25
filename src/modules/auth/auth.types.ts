@@ -33,3 +33,10 @@ export type TwoFactorChallengePayload = {
   sub: string;
   tv: number;
 };
+
+export type VerifiedTwoFactorChallenge = TwoFactorChallengePayload & {
+  /** Unique per challenge, so a used one can be refused. */
+  jti: string;
+  /** expiry, seconds since epoch */
+  exp: number;
+};

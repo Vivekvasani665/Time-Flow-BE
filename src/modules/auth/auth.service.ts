@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { env, isTest } from '../../config/env';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
+import { redis } from '../../lib/redis';
 import { sha256 } from '../../common/utils/crypto';
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../common/errors';
 import { fullName } from '../../common/utils/request-context';
@@ -46,7 +47,26 @@ export type TwoFactorChallenge = {
 };
 
 const CHALLENGE_INVALID = () =>
-  new UnauthorizedError('Your sign-in attempt has expired. Please sign in again.', 'TWO_FACTOR_CHALLENGE_INVALID');
+  new UnauthorizedError('This sign-in attempt is no longer valid. Please sign in again.', 'TWO_FACTOR_CHALLENGE_INVALID');
+
+const CHALLENGE_EXPIRED = () =>
+  new UnauthorizedError('Your verification session has expired. Please sign in again.', 'TWO_FACTOR_CHALLENGE_EXPIRED');
+
+/**
+ * Marks a challenge as spent, so one password check buys exactly one session.
+ * Returns false if it was already spent. Kept only until the token would have
+ * expired anyway. Fails open like the rate limiters: the code itself is still
+ * single-use (TOTP step / recovery code), so an outage only loses this extra check.
+ */
+async function claimChallenge(jti: string, exp: number): Promise<boolean> {
+  const ttlSeconds = Math.max(1, exp - Math.floor(Date.now() / 1000));
+  try {
+    return (await redis.set(`2fa:challenge:${jti}`, 'used', 'EX', ttlSeconds, 'NX')) === 'OK';
+  } catch (err) {
+    logger.error({ err }, '2FA challenge store unavailable; allowing sign-in');
+    return true;
+  }
+}
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, BCRYPT_COST);
@@ -163,7 +183,8 @@ export const authService = {
   /** Second step of a 2FA sign-in: exchanges the challenge + a code for a session. */
   async verifyTwoFactorLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { method: 'totp' | 'recovery' }> {
     const challenge = tokenService.verifyTwoFactorChallenge(challengeToken);
-    if (!challenge) throw CHALLENGE_INVALID();
+    if (challenge === 'expired') throw CHALLENGE_EXPIRED();
+    if (challenge === 'invalid') throw CHALLENGE_INVALID();
 
     const user = await prisma.user.findFirst({
       where: { id: challenge.sub, deletedAt: null },
@@ -193,6 +214,8 @@ export const authService = {
       });
       throw new UnauthorizedError('That code is not valid. Check your authenticator app and try again.', 'INVALID_TWO_FACTOR_CODE');
     }
+    // Claimed only after a good code, so a typo does not cost the user their sign-in.
+    if (!(await claimChallenge(challenge.jti, challenge.exp))) throw CHALLENGE_INVALID();
 
     const session = await issueSession(user, client);
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });

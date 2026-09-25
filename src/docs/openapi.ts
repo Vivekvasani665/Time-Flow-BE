@@ -627,7 +627,9 @@ export const openApiDocument = {
         summary: 'Complete a two-factor sign-in',
         description:
           'Exchanges the `challengeToken` from `/api/auth/login` plus a 6-digit authenticator code (or a single-use recovery code) ' +
-          'for a session. Sets the auth cookies. Codes are limited to 5 attempts per 5 minutes per user.',
+          'for a session. Sets the auth cookies. Codes are limited to 5 attempts per 5 minutes per user. ' +
+          'A challenge is single-use: once it has produced a session it is refused with `TWO_FACTOR_CHALLENGE_INVALID`. ' +
+          'An expired challenge is refused with `TWO_FACTOR_CHALLENGE_EXPIRED` — sign in again.',
         requestBody: body({
           type: 'object',
           required: ['challengeToken', 'code'],
@@ -642,7 +644,11 @@ export const openApiDocument = {
               recoveryCodesRemaining: { ...int, description: 'Present only when a recovery code was used.' },
             },
           }),
-          '401': errorResponse('Wrong code or expired challenge', 'INVALID_TWO_FACTOR_CODE', 'That code is not valid. Check your authenticator app and try again.'),
+          '401': errorResponse(
+            'Wrong code (`INVALID_TWO_FACTOR_CODE`), expired challenge (`TWO_FACTOR_CHALLENGE_EXPIRED`) or used/invalid challenge (`TWO_FACTOR_CHALLENGE_INVALID`)',
+            'INVALID_TWO_FACTOR_CODE',
+            'That code is not valid. Check your authenticator app and try again.',
+          ),
           ...errors(400, 429),
         },
       },

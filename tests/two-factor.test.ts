@@ -1,4 +1,6 @@
+import jwt from 'jsonwebtoken';
 import { describe, expect, it } from 'vitest';
+import { env } from '../src/config/env';
 import { base32Encode, generateTotp, totpStep, verifyTotp } from '../src/common/utils/totp';
 import { api, loginAs, nextIp, signUpAndLogin, unique } from './helpers';
 
@@ -125,6 +127,35 @@ describe('2FA sign-in', () => {
     expect(replay.status).toBe(401);
   });
 
+  it('spends the challenge on success, but not on a wrong code', async () => {
+    const user = await enrolledUser();
+    const { challengeToken } = (await login(user.email)).body.data;
+
+    expect((await loginTwoFactor(challengeToken, '000000')).status).toBe(401);
+    expect((await loginTwoFactor(challengeToken, code(user.secret))).status).toBe(200);
+
+    // A fresh, valid code still cannot turn the same challenge into a second session.
+    const reused = await loginTwoFactor(challengeToken, code(user.secret, 1));
+    expect(reused.status).toBe(401);
+    expect(reused.body.code).toBe('TWO_FACTOR_CHALLENGE_INVALID');
+  });
+
+  it('tells an expired challenge apart from an invalid one', async () => {
+    const user = await enrolledUser();
+    const expired = jwt.sign({ sub: user.userId, tv: 0, exp: Math.floor(Date.now() / 1000) - 5 }, env.JWT_ACCESS_SECRET, {
+      algorithm: 'HS256',
+      issuer: 'timeflow-api',
+      audience: 'timeflow-2fa',
+      jwtid: 'expired-challenge',
+    });
+    const res = await loginTwoFactor(expired, code(user.secret));
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('TWO_FACTOR_CHALLENGE_EXPIRED');
+
+    const garbage = await loginTwoFactor('not-a-token', '123456');
+    expect(garbage.body.code).toBe('TWO_FACTOR_CHALLENGE_INVALID');
+  });
+
   it('accepts each recovery code once', async () => {
     const user = await enrolledUser();
     const { challengeToken } = (await login(user.email)).body.data;
@@ -134,8 +165,11 @@ describe('2FA sign-in', () => {
     expect(ok.status).toBe(200);
     expect(ok.body.data.recoveryCodesRemaining).toBe(9);
 
-    const reused = await loginTwoFactor(challengeToken, recovery);
+    // A new sign-in, so it is the recovery code — not the spent challenge — being refused.
+    const again = (await login(user.email)).body.data.challengeToken;
+    const reused = await loginTwoFactor(again, recovery);
     expect(reused.status).toBe(401);
+    expect(reused.body.code).toBe('INVALID_TWO_FACTOR_CODE');
   });
 
   it('keeps challenge tokens and access tokens apart', async () => {
