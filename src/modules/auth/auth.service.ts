@@ -160,31 +160,6 @@ export const authService = {
     return session;
   },
 
-  /**
-   * Passwordless sign-in, last step: the code was right. Accounts with an
-   * authenticator app still owe their 2FA code, exactly as after a password.
-   */
-  async completeOtpLogin(userId: string, tokenVersion: number, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge> {
-    const user = await prisma.user.findFirst({
-      where: { id: userId, deletedAt: null, status: 'ACTIVE', tokenVersion },
-      select: { id: true, tokenVersion: true, firstName: true, lastName: true, twoFactorEnabled: true },
-    });
-    if (!user) throw new UnauthorizedError('This sign-in code is no longer valid. Request a new code.', 'OTP_TOKEN_INVALID');
-
-    if (user.twoFactorEnabled) {
-      const challenge = tokenService.signTwoFactorChallenge({ sub: user.id, tv: user.tokenVersion });
-      return { twoFactorRequired: true, challengeToken: challenge.token, challengeExpiresAt: challenge.expiresAt };
-    }
-
-    const session = await issueSession(user, client);
-    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-    void activityService.record(
-      { actorId: user.id, ...client },
-      { action: 'auth.login', entity: 'auth', entityId: user.id, description: `${fullName(user)} signed in with a one-time code`, metadata: { otpLogin: true } },
-    );
-    return session;
-  },
-
   /** Second step of a 2FA sign-in: exchanges the challenge + a code for a session. */
   async verifyTwoFactorLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { method: 'totp' | 'recovery' }> {
     const challenge = tokenService.verifyTwoFactorChallenge(challengeToken);

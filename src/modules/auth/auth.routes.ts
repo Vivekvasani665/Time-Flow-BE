@@ -1,4 +1,4 @@
-import { Router, type RequestHandler } from 'express';
+import { Router } from 'express';
 import { env } from '../../config/env';
 import { authenticate } from '../../common/middleware/authenticate';
 import { rateLimit } from '../../common/middleware/rate-limit';
@@ -57,26 +57,6 @@ const signupOtpResendLimiter = rateLimit({
   message: 'Too many code requests. Please wait a few minutes and try again.',
 });
 
-// Passwordless sign-in. Sending costs an email + SMS, so it is held tighter
-// than a password attempt; guessing is also capped per code (5) and per token.
-const otpSendLimiter = rateLimit({
-  name: 'otp-login-send',
-  limit: 5,
-  windowSeconds: 5 * 60,
-  message: 'Too many code requests. Please wait a few minutes and try again.',
-});
-
-const otpVerifyLimiter = rateLimit({
-  name: 'otp-login-verify',
-  limit: 10,
-  windowSeconds: 60,
-  message: 'Too many code attempts. Please wait a minute and try again.',
-});
-
-/** 404 while OTP_LOGIN_ENABLED is off, as if the routes did not exist. */
-const otpLoginEnabled: RequestHandler = (_req, res, next) =>
-  env.OTP_LOGIN_ENABLED ? next() : res.status(404).json({ success: false, statusCode: 404, message: 'Not found', code: 'NOT_FOUND' });
-
 const refreshLimiter = rateLimit({ name: 'refresh', limit: 30, windowSeconds: 60 });
 
 export const authRouter = Router();
@@ -87,9 +67,6 @@ authRouter.post('/verify-login-otp', loginOtpVerifyLimiter, authController.verif
 authRouter.post('/login/otp/verify', loginOtpVerifyLimiter, authController.verifyLoginOtp);
 authRouter.post('/resend-login-otp', loginOtpResendLimiter, authController.resendLoginOtp);
 authRouter.post('/login/otp/resend', loginOtpResendLimiter, authController.resendLoginOtp);
-authRouter.post('/send-otp', otpLoginEnabled, otpSendLimiter, authController.sendOtp);
-authRouter.post('/verify-otp', otpLoginEnabled, otpVerifyLimiter, authController.verifyOtp);
-authRouter.post('/resend-otp', otpLoginEnabled, otpSendLimiter, authController.resendOtp);
 authRouter.post('/register', registerLimiter, authController.register);
 authRouter.post('/register/verify-otp', signupOtpVerifyLimiter, authController.verifySignupOtp);
 authRouter.post('/register/resend-otp', signupOtpResendLimiter, authController.resendSignupOtp);

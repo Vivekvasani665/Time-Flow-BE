@@ -121,18 +121,3 @@ export function withDefaults(stored: unknown): Preferences {
   const parsed = preferenceFields.partial().safeParse(stored);
   return { ...DEFAULT_PREFERENCES, ...(parsed.success ? parsed.data : {}) };
 }
-
-/** Passwordless sign-in, step 1: exactly one of email or mobile number. */
-export const sendOtpSchema = z
-  .object({ email: emailSchema.optional(), phone: mobileSchema.optional() })
-  .strict()
-  .refine((v) => Boolean(v.email) !== Boolean(v.phone), { message: 'Enter your email or your mobile number', path: ['email'] });
-
-const otpToken = z.string({ message: 'Token is required' }).min(20, 'Invalid token').max(128, 'Invalid token');
-
-/** Passwordless sign-in, step 2. */
-export const verifyOtpSchema = z.object({ token: otpToken, otp: otpCode }).strict();
-
-export const resendOtpSchema = z
-  .object({ token: otpToken, channel: z.enum(['email', 'sms', 'both'], { message: 'Channel must be email, sms or both' }).default('both') })
-  .strict();
