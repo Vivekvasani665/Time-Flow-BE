@@ -38,6 +38,10 @@ export function createApp({ enableBullBoard = !isTest }: AppOptions = {}): Expre
   app.set('trust proxy', env.TRUST_PROXY);
 
   app.use(httpLogger);
+  // Hosting platforms probe `/` to detect the service; answer instead of logging a 404.
+  app.get('/', (_req, res) => {
+    res.json({ service: 'timeflow-api', status: 'ok' });
+  });
   app.use('/health', healthRouter);
 
   // Browser-rendered tooling needs inline scripts/styles; everything else gets strict defaults.
