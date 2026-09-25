@@ -738,6 +738,75 @@ export const openApiDocument = {
         responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 429) },
       },
     },
+    '/api/auth/send-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passwordless sign-in: send code (step 1 of 2)',
+        description:
+          'Send **either** `email` **or** `phone` (with country code). Generates one 6-digit code and a random `token`; ' +
+          'Redis keeps `sha256(token) → HMAC(code) + user + attempts` for 5 minutes. The code goes by email and, when the ' +
+          'account has a mobile number, SMS. A new request replaces the previous token. 30-second cooldown per account, ' +
+          '5 requests per 5 minutes per IP. Disabled (404) when OTP_LOGIN_ENABLED=false.',
+        requestBody: body({
+          type: 'object',
+          properties: { email: str({ example: 'sam@company.com' }), phone: str({ example: '+919876543210' }) },
+        }),
+        responses: {
+          '200': success({
+            type: 'object',
+            properties: {
+              token: str({ description: 'Send back with the code. Never contains the code.' }),
+              email: str({ example: 's****@company.com' }),
+              phone: nullable(str({ example: '+91******3210' })),
+              channels: { type: 'array', items: enumOf('email', 'sms') },
+              emailSent: bool,
+              smsSent: bool,
+              sameCodeOnAllChannels: bool,
+              delivery: { type: 'object', description: 'Per-channel outcome, as in LoginOtpChallenge.' },
+              expiresAt: dateTime,
+              resendAvailableAt: dateTime,
+              expiresInSeconds: { ...int, example: 300 },
+              resendAvailableInSeconds: { ...int, example: 30 },
+            },
+          }),
+          '403': errorResponse('Account cannot sign in', 'ACCOUNT_INACTIVE', 'Your account is inactive. Contact an administrator.'),
+          '404': errorResponse('No such account', 'ACCOUNT_NOT_FOUND', 'No account found for this email or mobile number.'),
+          '429': errorResponse('Cooldown', 'OTP_RATE_LIMITED', 'Please wait 24 seconds before requesting a new code.'),
+          '503': errorResponse('Code could not be sent', 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
+          ...errors(400),
+        },
+      },
+    },
+    '/api/auth/verify-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passwordless sign-in: verify code (step 2 of 2)',
+        description:
+          'Token + code. Each try counts (5 per code). A correct code deletes the token and signs in (sets `tf_access` / ' +
+          '`tf_refresh` cookies). Accounts with an authenticator app get `twoFactorRequired` instead and finish at /api/auth/login/2fa.',
+        requestBody: body({ type: 'object', required: ['token', 'otp'], properties: { token: str(), otp: str({ example: '482913' }) } }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '400': errorResponse('Wrong code', 'INVALID_OTP', 'Incorrect code. 4 attempts left.'),
+          '401': errorResponse('Unknown/used token or expired code', 'OTP_TOKEN_INVALID', 'This sign-in code is no longer valid. Request a new code.'),
+          '429': errorResponse('Too many wrong codes', 'OTP_MAX_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
+        },
+      },
+    },
+    '/api/auth/resend-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passwordless sign-in: resend code',
+        description: 'New code on the same token; the previous code stops working. `channel`: email, sms or both (default). 30-second cooldown, 5 codes per token.',
+        requestBody: body({ type: 'object', required: ['token'], properties: { token: str(), channel: enumOf('email', 'sms', 'both') } }),
+        responses: {
+          '200': success({ type: 'object', description: 'Same shape as /api/auth/send-otp.' }),
+          '401': errorResponse('Unknown or used token', 'OTP_TOKEN_INVALID', 'This sign-in code is no longer valid. Request a new code.'),
+          '429': errorResponse('Cooldown', 'OTP_RATE_LIMITED', 'Please wait 12 seconds before requesting a new code.'),
+          ...errors(400),
+        },
+      },
+    },
     '/api/auth/register': {
       post: {
         tags: ['Auth'],

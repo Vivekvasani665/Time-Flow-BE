@@ -7,6 +7,9 @@ import {
   disableTwoFactorSchema,
   loginSchema,
   resendLoginOtpSchema,
+  resendOtpSchema,
+  sendOtpSchema,
+  verifyOtpSchema,
   resendSignupOtpSchema,
   registerSchema,
   twoFactorCodeSchema,
@@ -18,6 +21,7 @@ import {
 import { authService } from './auth.service';
 import { twoFactorService } from './two-factor.service';
 import { loginOtpService } from './login-otp.service';
+import { otpLoginService } from './otp-login.service';
 import { OTP_CHANNELS, signupOtpService, type OtpChannel } from './signup-otp.service';
 
 const channelLabel = (channels: OtpChannel[]) =>
@@ -55,6 +59,29 @@ export const authController = {
   async resendLoginOtp(req: Request, res: Response) {
     const { verificationId, channel } = resendLoginOtpSchema.parse(req.body);
     const result = await loginOtpService.resend(verificationId, clientInfo(req), channel === 'both' ? undefined : [channel]);
+    return ok(res, result, `A new code has been sent to your ${channelLabel(result.channels)}`);
+  },
+
+  // ── Passwordless sign-in (token + OTP) ─────────────────────
+  async sendOtp(req: Request, res: Response) {
+    const input = sendOtpSchema.parse(req.body);
+    const result = await otpLoginService.send(input, clientInfo(req));
+    return ok(res, result, `OTP sent to your ${channelLabel(result.channels)}`);
+  },
+
+  async verifyOtp(req: Request, res: Response) {
+    const { token, otp } = verifyOtpSchema.parse(req.body);
+    const { userId, tokenVersion } = await otpLoginService.verify(token, otp, clientInfo(req));
+    const result = await authService.completeOtpLogin(userId, tokenVersion, clientInfo(req));
+    if ('twoFactorRequired' in result) return ok(res, result, 'Enter the code from your authenticator app');
+    tokenService.setAuthCookies(res, result.accessToken, result.refreshToken, result.refreshExpiresAt);
+    const user = await authService.getAuthUser(result.userId);
+    return ok(res, { user, accessToken: result.accessToken }, 'Signed in successfully');
+  },
+
+  async resendOtp(req: Request, res: Response) {
+    const { token, channel } = resendOtpSchema.parse(req.body);
+    const result = await otpLoginService.resend(token, channel === 'both' ? undefined : [channel], clientInfo(req));
     return ok(res, result, `A new code has been sent to your ${channelLabel(result.channels)}`);
   },
 

@@ -39,6 +39,12 @@ const EnvSchema = z.object({
    * or nobody can sign in. Accounts with an authenticator app use that instead.
    */
   LOGIN_OTP_ENABLED: bool.default(false),
+  /**
+   * Passwordless sign-in: POST /auth/send-otp with an email or mobile number,
+   * then /auth/verify-otp with the returned token and the code. Uses the
+   * LOGIN_OTP_* expiry and cooldown below.
+   */
+  OTP_LOGIN_ENABLED: bool.default(true),
   LOGIN_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
   LOGIN_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(60),
 
