@@ -3,12 +3,16 @@ import { listQuerySchema } from '../../common/http/pagination';
 import { emailSchema, passwordSchema, trimmed } from '../../common/utils/validation';
 
 const status = z.enum(['ACTIVE', 'INACTIVE'], { message: 'Status must be ACTIVE or INACTIVE' });
+/** PENDING (awaiting signup verification) can be filtered on, but only a signup OTP sets it. */
+const listStatus = z.enum(['ACTIVE', 'INACTIVE', 'PENDING'], { message: 'Status must be ACTIVE, INACTIVE or PENDING' });
 
+/** Stored in E.164 (+919876543210) so the number can receive SMS codes. Empty clears it. */
 const phone = z
   .string()
   .trim()
   .max(32)
-  .regex(/^(\+?[0-9 ()-]{7,32})?$/, 'Invalid phone number')
+  .transform((v) => v.replace(/[\s().-]/g, ''))
+  .pipe(z.string().regex(/^(\+[1-9]\d{7,14})?$/, 'Enter the mobile number with its country code, e.g. +919876543210'))
   .nullable()
   .transform((v) => (v ? v : null));
 
@@ -55,7 +59,7 @@ export const listUsersQuerySchema = listQuerySchema(
   ['createdAt', 'firstName', 'lastName', 'email', 'status', 'lastLoginAt'] as const,
   'createdAt',
 ).extend({
-  status: status.optional(),
+  status: listStatus.optional(),
   roleId: z.uuid().optional(),
 });
 

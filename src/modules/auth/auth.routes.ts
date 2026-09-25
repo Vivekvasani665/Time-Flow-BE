@@ -25,13 +25,54 @@ const twoFactorLoginLimiter = rateLimit({
   message: 'Too many code attempts. Please wait a minute and try again.',
 });
 
+// Per-IP guards on the emailed-code step. Guessing is capped per code as well
+// (5 wrong attempts), and resends by a per-attempt cooldown.
+const loginOtpVerifyLimiter = rateLimit({
+  name: 'login-otp-verify',
+  limit: 10,
+  windowSeconds: 60,
+  message: 'Too many code attempts. Please wait a minute and try again.',
+});
+
+const loginOtpResendLimiter = rateLimit({
+  name: 'login-otp-resend',
+  limit: 5,
+  windowSeconds: 5 * 60,
+  message: 'Too many code requests. Please wait a few minutes and try again.',
+});
+
+// Same shape of guard for the signup code: guessing is also capped per code
+// (5 wrong attempts), and resends by a per-signup cooldown.
+const signupOtpVerifyLimiter = rateLimit({
+  name: 'signup-otp-verify',
+  limit: 10,
+  windowSeconds: 60,
+  message: 'Too many code attempts. Please wait a minute and try again.',
+});
+
+const signupOtpResendLimiter = rateLimit({
+  name: 'signup-otp-resend',
+  limit: 5,
+  windowSeconds: 5 * 60,
+  message: 'Too many code requests. Please wait a few minutes and try again.',
+});
+
 const refreshLimiter = rateLimit({ name: 'refresh', limit: 30, windowSeconds: 60 });
 
 export const authRouter = Router();
 
 authRouter.post('/login', loginLimiter, authController.login);
 authRouter.post('/login/2fa', twoFactorLoginLimiter, authController.loginTwoFactor);
+authRouter.post('/login/2fa/setup', twoFactorLoginLimiter, authController.loginTwoFactorSetup);
+authRouter.post('/login/2fa/passkey/options', twoFactorLoginLimiter, authController.passkeyLoginOptions);
+authRouter.post('/login/2fa/passkey', twoFactorLoginLimiter, authController.loginPasskey);
+authRouter.post('/verify-login-otp', loginOtpVerifyLimiter, authController.verifyLoginOtp);
+authRouter.post('/login/otp/verify', loginOtpVerifyLimiter, authController.verifyLoginOtp);
+authRouter.post('/resend-login-otp', loginOtpResendLimiter, authController.resendLoginOtp);
+authRouter.post('/login/otp/resend', loginOtpResendLimiter, authController.resendLoginOtp);
 authRouter.post('/register', registerLimiter, authController.register);
+authRouter.post('/register/verify-otp', signupOtpVerifyLimiter, authController.verifySignupOtp);
+authRouter.post('/register/resend-otp', signupOtpResendLimiter, authController.resendSignupOtp);
 authRouter.post('/refresh', refreshLimiter, authController.refresh);
 authRouter.post('/logout', authController.logout);
 authRouter.get('/me', authenticate, authController.me);
@@ -44,6 +85,13 @@ authRouter.delete('/me/sessions/:id', authenticate, authController.revokeSession
 // Two-factor authentication (TOTP) for your own account.
 authRouter.get('/me/2fa', authenticate, authController.twoFactorStatus);
 authRouter.post('/me/2fa/setup', authenticate, authController.twoFactorSetup);
+authRouter.delete('/me/2fa/setup', authenticate, authController.twoFactorCancelSetup);
 authRouter.post('/me/2fa/enable', authenticate, authController.twoFactorEnable);
+authRouter.delete('/me/2fa/totp', authenticate, authController.twoFactorRemoveTotp);
 authRouter.post('/me/2fa/disable', authenticate, authController.twoFactorDisable);
 authRouter.post('/me/2fa/recovery-codes', authenticate, authController.twoFactorRegenerateCodes);
+// Passkey proof before a sensitive change (disable, new recovery codes).
+authRouter.post('/me/2fa/step-up/options', authenticate, authController.twoFactorStepUpOptions);
+authRouter.post('/me/2fa/passkeys/options', authenticate, authController.passkeyRegistrationOptions);
+authRouter.post('/me/2fa/passkeys', authenticate, authController.registerPasskey);
+authRouter.delete('/me/2fa/passkeys/:id', authenticate, authController.removePasskey);

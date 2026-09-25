@@ -1,8 +1,9 @@
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
-import { isTest } from '../../config/env';
+import { env, isTest } from '../../config/env';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
+import { redis } from '../../lib/redis';
 import { sha256 } from '../../common/utils/crypto';
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../common/errors';
 import { fullName } from '../../common/utils/request-context';
@@ -12,7 +13,13 @@ import { withDefaults, type Preferences } from './auth.schemas';
 import { cache } from '../../cache/cache.service';
 import { producers } from '../../queue/producers';
 import { tokenService } from './token.service';
-import { twoFactorService } from './two-factor.service';
+import { consumeAttempt, twoFactorService, type TwoFactorMethod } from './two-factor.service';
+import { loginAuthKey, passkeyService, PASSKEY_FAILED } from './passkey.service';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
+import type { TwoFactorChallengePurpose, VerifiedTwoFactorChallenge } from './auth.types';
+import { loginOtpService, type LoginOtpChallenge } from './login-otp.service';
+import { signupOtpService, type SignupOtpChallenge } from './signup-otp.service';
+import { userRepository } from '../users/user.repository';
 import type { LoginInput, RegisterInput } from './auth.schemas';
 
 /** Role given to everyone who signs up themselves; admins can promote them later. */
@@ -35,15 +42,99 @@ export type IssuedSession = {
   userId: string;
 };
 
-/** Password was right, but the account has 2FA: no session until a code is supplied. */
+/** Password was right, but the account has 2FA: no session until a second factor is supplied. */
 export type TwoFactorChallenge = {
   twoFactorRequired: true;
   challengeToken: string;
   challengeExpiresAt: Date;
+  /** What this account can use: `totp`, `passkey`, and always `recovery`. */
+  methods: TwoFactorMethod[];
+};
+
+/**
+ * Password was right and 2FA is not on yet, but the user started setting up an
+ * authenticator app in Settings: the sign-in finishes that setup. The QR code
+ * is the one from Settings — the pending secret is reused, never regenerated.
+ */
+export type TwoFactorSetupChallenge = {
+  twoFactorSetupRequired: true;
+  challengeToken: string;
+  challengeExpiresAt: Date;
+  setup: { secret: string; otpauthUrl: string; qrCodeDataUrl: string };
+};
+
+type ChallengeUser = {
+  id: string;
+  email: string;
+  status: string;
+  tokenVersion: number;
+  firstName: string;
+  lastName: string;
+  twoFactorEnabled: boolean;
+  twoFactorSecret: string | null;
 };
 
 const CHALLENGE_INVALID = () =>
-  new UnauthorizedError('Your sign-in attempt has expired. Please sign in again.', 'TWO_FACTOR_CHALLENGE_INVALID');
+  new UnauthorizedError('This sign-in attempt is no longer valid. Please sign in again.', 'TWO_FACTOR_CHALLENGE_INVALID');
+
+const CHALLENGE_EXPIRED = () =>
+  new UnauthorizedError('Your verification session has expired. Please sign in again.', 'TWO_FACTOR_CHALLENGE_EXPIRED');
+
+/**
+ * Marks a challenge as spent, so one password check buys exactly one session.
+ * Returns false if it was already spent. Kept only until the token would have
+ * expired anyway. Fails open like the rate limiters: the code itself is still
+ * single-use (TOTP step / recovery code), so an outage only loses this extra check.
+ */
+async function claimChallenge(jti: string, exp: number): Promise<boolean> {
+  const ttlSeconds = Math.max(1, exp - Math.floor(Date.now() / 1000));
+  try {
+    return (await redis.set(`2fa:challenge:${jti}`, 'used', 'EX', ttlSeconds, 'NX')) === 'OK';
+  } catch (err) {
+    logger.error({ err }, '2FA challenge store unavailable; allowing sign-in');
+    return true;
+  }
+}
+
+/** Validates a challenge token and loads its user, refusing anything stale. */
+async function loadChallenge(token: string, purpose: TwoFactorChallengePurpose): Promise<{ challenge: VerifiedTwoFactorChallenge; user: ChallengeUser }> {
+  const challenge = tokenService.verifyTwoFactorChallenge(token, purpose);
+  if (challenge === 'expired') throw CHALLENGE_EXPIRED();
+  if (challenge === 'invalid') throw CHALLENGE_INVALID();
+
+  const user = await prisma.user.findFirst({
+    where: { id: challenge.sub, deletedAt: null },
+    select: { id: true, email: true, status: true, tokenVersion: true, firstName: true, lastName: true, twoFactorEnabled: true, twoFactorSecret: true },
+  });
+  if (!user || user.tokenVersion !== challenge.tv) throw CHALLENGE_INVALID();
+  if (purpose === 'verify' && !user.twoFactorEnabled) throw CHALLENGE_INVALID();
+  if (user.status !== 'ACTIVE') {
+    throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
+  }
+  return { challenge, user };
+}
+
+function recordFailed(user: ChallengeUser, client: ClientInfo) {
+  void activityService.record(
+    { actorId: user.id, ...client },
+    { action: 'auth.2fa_failed', entity: 'auth', entityId: user.id, description: `Failed two-factor verification for ${fullName(user)}` },
+  );
+}
+
+/** The second factor checked out: spend the challenge and issue the session. */
+async function finishTwoFactorLogin(user: ChallengeUser, challenge: VerifiedTwoFactorChallenge, client: ClientInfo, method: TwoFactorMethod) {
+  // Claimed only after a good factor, so a typo does not cost the user their sign-in.
+  if (!(await claimChallenge(challenge.jti, challenge.exp))) throw CHALLENGE_INVALID();
+
+  const session = await issueSession(user, client);
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  const how = method === 'recovery' ? ' with a recovery code' : method === 'passkey' ? ' with a passkey' : '';
+  void activityService.record(
+    { actorId: user.id, ...client },
+    { action: 'auth.login', entity: 'auth', entityId: user.id, description: `${fullName(user)} signed in${how}`, metadata: { twoFactor: method } },
+  );
+  return session;
+}
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, BCRYPT_COST);
@@ -76,17 +167,24 @@ async function issueSession(
 }
 
 export const authService = {
-  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge> {
+  async login(input: LoginInput, client: ClientInfo): Promise<IssuedSession | TwoFactorChallenge | TwoFactorSetupChallenge | LoginOtpChallenge> {
+    const identifier = input.email ?? input.phone ?? '';
+    // A phone number is resolved to its account first; a miss still runs the password check below, so timing does not reveal it.
+    const phoneUserId = input.phone ? await userRepository.findIdByPhone(input.phone) : null;
     const user = await prisma.user.findFirst({
-      where: { email: input.email, deletedAt: null },
+      where: input.phone ? { id: phoneUserId ?? '00000000-0000-0000-0000-000000000000', deletedAt: null } : { email: input.email, deletedAt: null },
       select: {
         id: true,
+        email: true,
+        phone: true,
         passwordHash: true,
         status: true,
         tokenVersion: true,
         firstName: true,
         lastName: true,
         twoFactorEnabled: true,
+        twoFactorSecret: true,
+        twoFactorPendingSecret: true,
       },
     });
 
@@ -98,10 +196,13 @@ export const authService = {
         action: 'auth.login_failed',
         entity: 'auth',
         entityId: user?.id ?? null,
-        description: `Failed login attempt for ${input.email}`,
-        metadata: { email: input.email },
+        description: `Failed login attempt for ${identifier}`,
+        metadata: input.phone ? { phone: input.phone } : { email: input.email },
       });
-      throw new UnauthorizedError('Invalid email or password', 'INVALID_CREDENTIALS');
+      throw new UnauthorizedError(input.phone ? 'Invalid mobile number or password' : 'Invalid email or password', 'INVALID_CREDENTIALS');
+    }
+    if (user.status === 'PENDING') {
+      throw new ForbiddenError('Your account is not verified yet. Enter the code we sent to your email and mobile number, or sign up again to get a new one.', 'ACCOUNT_NOT_VERIFIED');
     }
     if (user.status !== 'ACTIVE') {
       throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
@@ -109,9 +210,23 @@ export const authService = {
 
     if (user.twoFactorEnabled) {
       // tv is carried so a password change mid-challenge voids the challenge.
-      const challenge = tokenService.signTwoFactorChallenge({ sub: user.id, tv: user.tokenVersion });
-      return { twoFactorRequired: true, challengeToken: challenge.token, challengeExpiresAt: challenge.expiresAt };
+      const challenge = tokenService.signTwoFactorChallenge({ sub: user.id, tv: user.tokenVersion, pur: 'verify' });
+      return {
+        twoFactorRequired: true,
+        challengeToken: challenge.token,
+        challengeExpiresAt: challenge.expiresAt,
+        methods: await twoFactorService.methods(user),
+      };
     }
+
+    const setup = await twoFactorService.pendingSetup(user);
+    if (setup) {
+      const challenge = tokenService.signTwoFactorChallenge({ sub: user.id, tv: user.tokenVersion, pur: 'setup' });
+      return { twoFactorSetupRequired: true, challengeToken: challenge.token, challengeExpiresAt: challenge.expiresAt, setup };
+    }
+
+    // An authenticator app is the stronger factor, so it takes precedence over the emailed code.
+    if (env.LOGIN_OTP_ENABLED) return loginOtpService.start(user, origin);
 
     const session = await issueSession(user, client);
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
@@ -125,91 +240,138 @@ export const authService = {
     return session;
   },
 
-  /** Second step of a 2FA sign-in: exchanges the challenge + a code for a session. */
-  async verifyTwoFactorLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { method: 'totp' | 'recovery' }> {
-    const challenge = tokenService.verifyTwoFactorChallenge(challengeToken);
-    if (!challenge) throw CHALLENGE_INVALID();
-
+  /** Second step of an emailed-code sign-in: the session is issued only here. */
+  async verifyLoginOtp(verificationId: string, otp: string, client: ClientInfo): Promise<IssuedSession> {
+    const userId = await loginOtpService.verify(verificationId, otp, client);
     const user = await prisma.user.findFirst({
-      where: { id: challenge.sub, deletedAt: null },
-      select: {
-        id: true,
-        status: true,
-        tokenVersion: true,
-        firstName: true,
-        lastName: true,
-        twoFactorEnabled: true,
-        twoFactorSecret: true,
-      },
+      where: { id: userId, deletedAt: null },
+      select: { id: true, status: true, tokenVersion: true, firstName: true, lastName: true },
     });
-    if (!user || user.tokenVersion !== challenge.tv || !user.twoFactorEnabled) throw CHALLENGE_INVALID();
-    if (user.status !== 'ACTIVE') {
-      throw new ForbiddenError('Your account is inactive. Contact an administrator.', 'ACCOUNT_INACTIVE');
-    }
-
-    const origin: ActivityOrigin = { actorId: user.id, ...client };
-    const method = await twoFactorService.verifyCode(user, code);
-    if (!method) {
-      void activityService.record(origin, {
-        action: 'auth.2fa_failed',
-        entity: 'auth',
-        entityId: user.id,
-        description: `Failed two-factor code for ${fullName(user)}`,
-      });
-      throw new UnauthorizedError('That code is not valid. Check your authenticator app and try again.', 'INVALID_TWO_FACTOR_CODE');
+    // Deactivated or deleted while the code was in flight.
+    if (!user || user.status !== 'ACTIVE') {
+      throw new UnauthorizedError('This sign-in attempt is no longer valid. Please sign in again.', 'LOGIN_OTP_SESSION_INVALID');
     }
 
     const session = await issueSession(user, client);
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-
-    void activityService.record(origin, {
-      action: 'auth.login',
-      entity: 'auth',
-      entityId: user.id,
-      description: method === 'recovery' ? `${fullName(user)} signed in with a recovery code` : `${fullName(user)} signed in`,
-      metadata: { twoFactor: method },
-    });
-    return { ...session, method };
+    void activityService.record(
+      { actorId: user.id, ...client },
+      { action: 'auth.login', entity: 'auth', entityId: user.id, description: `${fullName(user)} signed in`, metadata: { loginOtp: true } },
+    );
+    return session;
   },
 
-  /** Self-service sign-up: creates an active user with the default role and signs them in. */
-  async register(input: RegisterInput, client: ClientInfo): Promise<IssuedSession> {
+  /** Second step of a 2FA sign-in: exchanges the challenge + a code for a session. */
+  async verifyTwoFactorLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { method: TwoFactorMethod }> {
+    const { challenge, user } = await loadChallenge(challengeToken, 'verify');
+    const method = await twoFactorService.verifyCode(user, code);
+    if (!method) {
+      recordFailed(user, client);
+      throw new UnauthorizedError('That code is not valid. Check your authenticator app and try again.', 'INVALID_TWO_FACTOR_CODE');
+    }
+    return { ...(await finishTwoFactorLogin(user, challenge, client, method)), method };
+  },
+
+  /** Passkey sign-in, part 1: options for `navigator.credentials.get()`, bound to this sign-in attempt. */
+  async passkeyLoginOptions(challengeToken: string) {
+    const { challenge, user } = await loadChallenge(challengeToken, 'verify');
+    return passkeyService.authenticationOptions(user.id, loginAuthKey(challenge.jti));
+  },
+
+  /** Passkey sign-in, part 2: a signature from one of the user's passkeys buys the session. */
+  async verifyPasskeyLogin(challengeToken: string, response: AuthenticationResponseJSON, client: ClientInfo): Promise<IssuedSession> {
+    const { challenge, user } = await loadChallenge(challengeToken, 'verify');
+    await consumeAttempt(user.id);
+    if (!(await passkeyService.verifyAuthentication(user.id, loginAuthKey(challenge.jti), response))) {
+      recordFailed(user, client);
+      throw PASSKEY_FAILED();
+    }
+    return finishTwoFactorLogin(user, challenge, client, 'passkey');
+  },
+
+  /**
+   * Finishes a pending authenticator setup at sign-in: a code from the newly
+   * scanned app turns 2FA on and buys the session. Returns the recovery codes.
+   */
+  async completeTwoFactorSetupLogin(challengeToken: string, code: string, client: ClientInfo): Promise<IssuedSession & { recoveryCodes: string[] }> {
+    const { challenge, user } = await loadChallenge(challengeToken, 'setup');
+    // Turned on some other way meanwhile (e.g. a passkey): this sign-in is stale.
+    if (user.twoFactorEnabled) throw CHALLENGE_INVALID();
+    const { recoveryCodes } = await twoFactorService.enable(user.id, code, { actorId: user.id, ...client });
+    const session = await finishTwoFactorLogin(user, challenge, client, 'totp');
+    return { ...session, recoveryCodes: recoveryCodes ?? [] };
+  },
+
+  /**
+   * Self-service sign-up, step 1: creates a PENDING user with the default role
+   * and sends one code to its email and mobile number. No session is issued —
+   * the account can sign in only after verifySignup.
+   */
+  async register(input: RegisterInput, client: ClientInfo): Promise<SignupOtpChallenge> {
     const role = await prisma.role.findUnique({ where: { name: SIGNUP_ROLE }, select: { id: true } });
     if (!role) {
       logger.error({ role: SIGNUP_ROLE }, 'sign-up role is missing; run the seed');
       throw new ForbiddenError('Sign-up is not available right now', 'SIGNUP_UNAVAILABLE');
     }
-    const taken = await prisma.user.count({ where: { email: input.email, deletedAt: null } });
-    if (taken > 0) throw new ConflictError('An account with this email already exists', 'USER_EMAIL_EXISTS');
+    // An unverified (PENDING) signup does not own its email or number: signing
+    // up again replaces it, so an abandoned attempt never locks anyone out.
+    const emailTaken = await prisma.user.count({ where: { email: input.email, deletedAt: null, status: { not: 'PENDING' } } });
+    if (emailTaken > 0) throw new ConflictError('An account with this email already exists', 'USER_EMAIL_EXISTS');
+    if (await userRepository.phoneTaken(input.phone, { ignorePending: true })) {
+      throw new ConflictError('An account with this mobile number already exists', 'USER_PHONE_EXISTS');
+    }
 
-    // Explicit field whitelist — request bodies are never spread into Prisma.
-    const user = await prisma.user.create({
-      data: {
-        firstName: input.firstName,
-        lastName: input.lastName,
-        email: input.email,
-        status: 'ACTIVE',
-        roleId: role.id,
-        passwordHash: await hashPassword(input.password),
-        lastLoginAt: new Date(),
-      },
-      select: { id: true, email: true, firstName: true, lastName: true, tokenVersion: true },
+    const digits = input.phone.replace(/\D/g, '');
+    const passwordHash = await hashPassword(input.password);
+    const user = await prisma.$transaction(async (tx) => {
+      const stale = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM users
+        WHERE deleted_at IS NULL AND status = 'PENDING'
+          AND (email = ${input.email} OR regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = ${digits})`;
+      if (stale.length > 0) await tx.user.deleteMany({ where: { id: { in: stale.map((r) => r.id) }, status: 'PENDING' } });
+
+      // Explicit field whitelist — request bodies are never spread into Prisma.
+      return tx.user.create({
+        data: {
+          firstName: input.firstName,
+          lastName: input.lastName,
+          email: input.email,
+          phone: input.phone,
+          status: 'PENDING',
+          roleId: role.id,
+          passwordHash,
+        },
+        select: { id: true, email: true, phone: true, firstName: true, lastName: true },
+      });
     });
 
-    const session = await issueSession(user, client);
+    const origin: ActivityOrigin = { actorId: user.id, ...client };
+    let challenge: SignupOtpChallenge;
+    try {
+      challenge = await signupOtpService.start(user, origin);
+    } catch (err) {
+      // No code reached the user, so the account could never be verified.
+      await prisma.user.deleteMany({ where: { id: user.id, status: 'PENDING' } });
+      throw err;
+    }
+
+    void activityService.record(origin, {
+      action: 'user.registered',
+      entity: 'user',
+      entityId: user.id,
+      description: `${fullName(user)} signed up`,
+      metadata: { email: user.email, role: SIGNUP_ROLE, status: 'PENDING' },
+    });
+    return challenge;
+  },
+
+  /** Self-service sign-up, step 2: the code activates the account. The user then signs in normally. */
+  async verifySignup(verificationId: string, otp: string, client: ClientInfo): Promise<{ id: string; email: string }> {
+    const userId = await signupOtpService.verify(verificationId, otp, client);
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { id: true, email: true, firstName: true } });
     await cache.invalidate('dashboard');
-    void producers.welcomeEmail({ id: user.id, email: user.email, firstName: user.firstName }, user.id);
-    void activityService.record(
-      { actorId: user.id, ...client },
-      {
-        action: 'user.registered',
-        entity: 'user',
-        entityId: user.id,
-        description: `${fullName(user)} signed up`,
-        metadata: { email: user.email, role: SIGNUP_ROLE },
-      },
-    );
-    return session;
+    void producers.welcomeEmail(user, user.id);
+    return { id: user.id, email: user.email };
   },
 
   /**

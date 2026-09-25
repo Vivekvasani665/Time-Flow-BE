@@ -33,6 +33,70 @@ const EnvSchema = z.object({
   TOTP_ISSUER: z.string().min(1).default('TimeFlow'),
   /** How long a password-verified sign-in waits for its 2FA code. */
   TWO_FACTOR_CHALLENGE_TTL_MINUTES: z.coerce.number().int().positive().default(5),
+  /**
+   * Passkeys are bound to a domain (the "relying party"). Defaults to APP_URL's
+   * host name, e.g. `timeflow.example.com`; changing it later orphans every
+   * registered passkey.
+   */
+  WEBAUTHN_RP_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Origins the browser may prove a passkey from. Defaults to APP_URL's origin. Comma-separated. */
+  WEBAUTHN_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined)),
+  /**
+   * Emails a 6-digit code after a correct password, and issues the session
+   * only once it is entered. Off by default: it needs working outgoing mail,
+   * or nobody can sign in. Accounts with an authenticator app use that instead.
+   */
+  LOGIN_OTP_ENABLED: bool.default(false),
+  LOGIN_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+  LOGIN_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(60),
+
+  /** Self-registration: one code, sent to both the email address and the mobile number. */
+  SIGNUP_OTP_TTL_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
+  SIGNUP_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(0).default(30),
+
+  /**
+   * Outgoing SMS transport for signup codes:
+   *   log    — write the message to the server log instead of sending (development)
+   *   twilio — Twilio Messages API; needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
+   *   msg91  — MSG91 Flow API; needs MSG91_AUTH_KEY and a DLT-approved MSG91_TEMPLATE_ID
+   *            whose variables are ##otp## and ##minutes##
+   *   2factor — 2Factor.in OTP SMS; needs TWOFACTOR_API_KEY. Uses 2Factor's own
+   *            DLT-approved OTP template, so no DLT registration of your own
+   *   brevo  — Brevo transactional SMS; needs BREVO_API_KEY (xkeysib-…, not the
+   *            xsmtpsib- SMTP key) and SMS credits on the Brevo account
+   */
+  SMS_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['log', 'twilio', 'msg91', '2factor', 'brevo']).default('log')),
+  /** Same safety catch as EMAIL_ALLOW_REAL_SEND: outside production a real provider is refused unless set. */
+  SMS_ALLOW_REAL_SEND: bool.default(false),
+  TWILIO_ACCOUNT_SID: z.string().optional().transform((v) => (v ? v : undefined)),
+  TWILIO_AUTH_TOKEN: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** A Twilio number in E.164 form, or a Messaging Service SID (MG…). Not needed with a Verify service. */
+  TWILIO_FROM: z.string().optional().transform((v) => (v ? v : undefined)),
+  /**
+   * Twilio Verify service (VA…). When set, SMS codes go through Verify, which
+   * sends from Twilio's own numbers and makes its OWN code — so the SMS code
+   * differs from the emailed one, and either is accepted at verification.
+   */
+  TWILIO_VERIFY_SERVICE_SID: z.string().optional().transform((v) => (v ? v : undefined)),
+  BREVO_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Sender name shown on the SMS: up to 11 letters/digits, or a number of up to 15 digits. */
+  BREVO_SMS_SENDER: z.string().regex(/^([A-Za-z0-9]{1,11}|\d{1,15})$/, 'BREVO_SMS_SENDER: up to 11 letters/digits, or up to 15 digits').default('TimeFlow'),
+  TWOFACTOR_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Optional name of an OTP template approved in the 2Factor dashboard; their default is used when unset. */
+  TWOFACTOR_TEMPLATE_NAME: z.string().optional().transform((v) => (v ? v : undefined)),
+  MSG91_AUTH_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  MSG91_TEMPLATE_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** 6-letter DLT-registered header, e.g. TMFLOW. Optional when the template already has one. */
+  MSG91_SENDER_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+
+  /** How long an administrator-issued password reset link stays usable. Links go to APP_URL/reset-password. */
+  RESET_PASSWORD_TOKEN_EXPIRY_MINUTES: z.coerce.number().int().min(5).max(1440).default(30),
+
+  /** How long a Super Admin's invitation link stays usable. Links go to APP_URL/accept-invitation. */
+  INVITATION_EXPIRY_HOURS: z.coerce.number().int().min(1).max(720).default(72),
 
   CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(5),
@@ -85,13 +149,31 @@ const EnvSchema = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
 
   UPLOAD_DIR: z.string().default('./uploads'),
+
+  /**
+   * Adds the raw error text to 500 responses as `debug`. Off by default so
+   * database errors and file paths never reach a browser; the full error is
+   * always in the server log. Ignored in production.
+   */
+  EXPOSE_ERROR_DETAILS: bool.default(false),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
 
 function loadEnv(): Env {
-  // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name.
-  const parsed = EnvSchema.safeParse({ ...process.env, SMTP_PASS: process.env.SMTP_PASS || process.env.SMTP_PASSWORD });
+  // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name,
+  // and the generic SMS_API_KEY / SMS_TEMPLATE_ID / SMS_SENDER_ID for the SMS provider's.
+  const e = process.env;
+  const parsed = EnvSchema.safeParse({
+    ...e,
+    SMTP_PASS: e.SMTP_PASS || e.SMTP_PASSWORD,
+    MSG91_AUTH_KEY: e.MSG91_AUTH_KEY || e.SMS_API_KEY,
+    TWOFACTOR_API_KEY: e.TWOFACTOR_API_KEY || e.SMS_API_KEY,
+    BREVO_API_KEY: e.BREVO_API_KEY || e.SMS_API_KEY,
+    BREVO_SMS_SENDER: e.BREVO_SMS_SENDER || e.SMS_SENDER_ID || undefined,
+    MSG91_TEMPLATE_ID: e.MSG91_TEMPLATE_ID || e.SMS_TEMPLATE_ID,
+    MSG91_SENDER_ID: e.MSG91_SENDER_ID || e.SMS_SENDER_ID,
+  });
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
     // Logger depends on env, so fail fast with plain stderr.
@@ -118,6 +200,10 @@ export function productionWarnings(): string[] {
   if (/dev-only|replace-with|change-me/i.test(env.JWT_ACCESS_SECRET)) warnings.push('JWT_ACCESS_SECRET is a placeholder — generate one with `openssl rand -base64 48`.');
   if (local.test(env.APP_URL)) warnings.push(`APP_URL is ${env.APP_URL} — links in emails will point at localhost.`);
   if (env.CORS_ORIGINS.some((o) => local.test(o))) warnings.push('CORS_ORIGINS still allows a localhost origin.');
+  if (env.LOGIN_OTP_ENABLED && (env.EMAIL_PROVIDER ?? (env.SMTP_HOST ? 'smtp' : 'log')) === 'log') {
+    warnings.push('LOGIN_OTP_ENABLED is true but no mail provider is configured — sign-in codes cannot be delivered, so nobody can sign in unless a mail account is set up in System → Email delivery.');
+  }
+  if (env.SMS_PROVIDER === 'log') warnings.push('SMS_PROVIDER is log — signup codes are written to the server log instead of being texted.');
   if (env.EMAIL_FAILURE_RATE > 0) warnings.push(`EMAIL_FAILURE_RATE is ${env.EMAIL_FAILURE_RATE} — real emails will be failed on purpose.`);
   return warnings;
 }

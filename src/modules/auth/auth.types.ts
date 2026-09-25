@@ -28,8 +28,22 @@ export type VerifiedAccessToken = AccessTokenPayload & {
   exp: number;
 };
 
-/** Proves the password step of a 2FA sign-in; exchanged for a session with a TOTP code. */
+/**
+ * Proves the password step of a 2FA sign-in. `verify`: exchanged for a session
+ * with a second factor. `setup`: 2FA is not on yet but an authenticator setup
+ * is pending, so the session comes with finishing it.
+ */
+export type TwoFactorChallengePurpose = 'verify' | 'setup';
+
 export type TwoFactorChallengePayload = {
   sub: string;
   tv: number;
+  pur: TwoFactorChallengePurpose;
+};
+
+export type VerifiedTwoFactorChallenge = TwoFactorChallengePayload & {
+  /** Unique per challenge, so a used one can be refused. */
+  jti: string;
+  /** expiry, seconds since epoch */
+  exp: number;
 };

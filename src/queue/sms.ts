@@ -1,0 +1,271 @@
+import { env, isProd } from '../config/env';
+import { logger } from '../lib/logger';
+
+/** `to` is E.164, e.g. +919876543210. `vars` fill a DLT template (MSG91); `body` is the plain text (Twilio, log). */
+export type SmsMessage = { to: string; body: string; vars?: { otp: string; minutes: number } };
+
+/**
+ * Why a message did not go out. Safe to show a client: it names the kind of
+ * failure, never the provider's raw reply (that stays in the server log).
+ */
+export type SmsFailureCode =
+  | 'INVALID_PHONE_NUMBER'
+  | 'SMS_NOT_CONFIGURED'
+  | 'SMS_BLOCKED_IN_DEVELOPMENT'
+  | 'SMS_PROVIDER_AUTH_FAILED'
+  | 'SMS_PROVIDER_UNAVAILABLE'
+  | 'SMS_DELIVERY_FAILED';
+
+export class SmsError extends Error {
+  constructor(
+    readonly code: SmsFailureCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SmsError';
+  }
+}
+
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/** Last 4 digits only — enough to match a log line to a signup without logging the number. */
+const tail = (to: string) => `…${to.slice(-4)}`;
+
+function providerFailure(provider: string, status: number, detail: string): SmsError {
+  logger.error({ provider, httpStatus: status, detail }, '[SMS] provider response: rejected');
+  if (status === 401 || status === 403) return new SmsError('SMS_PROVIDER_AUTH_FAILED', `${provider} rejected the credentials (${status})`);
+  if (status >= 500) return new SmsError('SMS_PROVIDER_UNAVAILABLE', `${provider} is unavailable (${status}): ${detail}`);
+  return new SmsError('SMS_DELIVERY_FAILED', `${provider} rejected the message (${status}): ${detail}`);
+}
+
+async function post(provider: string, url: string, init: RequestInit & { method?: string }): Promise<{ status: number; data: Record<string, unknown> }> {
+  try {
+    const res = await fetch(url, { method: 'POST', ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { status: res.status, data };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.error({ provider, reason }, '[SMS] provider could not be reached');
+    throw new SmsError('SMS_PROVIDER_UNAVAILABLE', `${provider} could not be reached: ${reason}`);
+  }
+}
+
+async function twilio(message: SmsMessage): Promise<string> {
+  const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_FROM: from } = env;
+  if (!sid || !token || !from) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=twilio needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM');
+
+  const form = new URLSearchParams({ To: message.to, Body: message.body });
+  // A Messaging Service SID picks its own sender; anything else is a phone number.
+  form.set(from.startsWith('MG') ? 'MessagingServiceSid' : 'From', from);
+
+  const { status, data } = await post('twilio', `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form,
+  });
+  if (status >= 300) {
+    // The usual trial-account failures, spelled out for whoever reads the log.
+    const hints: Record<number, string> = {
+      21608: 'trial account: verify this recipient in Twilio Console → Phone Numbers → Verified Caller IDs, or upgrade the account',
+      21606: 'TWILIO_FROM is not an SMS-capable number on this account',
+      21659: 'TWILIO_FROM is not a Twilio number on this account',
+      21211: 'the recipient number is not valid',
+      21408: 'SMS to this country is not enabled — Twilio Console → Messaging → Settings → Geo permissions',
+    };
+    const hint = hints[Number(data.code)];
+    throw providerFailure('twilio', status, `${data.code ?? ''} ${data.message ?? 'no detail'}${hint ? ` — ${hint}` : ''}`.trim());
+  }
+  logger.info({ provider: 'twilio', httpStatus: status, messageId: data.sid, providerStatus: data.status }, '[SMS] provider response: accepted');
+  return String(data.sid ?? 'twilio');
+}
+
+/**
+ * MSG91 Flow API. Indian DLT rules only allow pre-approved templates, so the
+ * text is the template's, filled from `vars` — `body` is not sent.
+ */
+async function msg91(message: SmsMessage): Promise<string> {
+  const { MSG91_AUTH_KEY: authKey, MSG91_TEMPLATE_ID: templateId, MSG91_SENDER_ID: sender } = env;
+  if (!authKey || !templateId) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=msg91 needs MSG91_AUTH_KEY (SMS_API_KEY) and MSG91_TEMPLATE_ID (SMS_TEMPLATE_ID)');
+
+  const { status, data } = await post('msg91', 'https://control.msg91.com/api/v5/flow', {
+    headers: { authkey: authKey, 'Content-Type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({
+      template_id: templateId,
+      ...(sender ? { sender } : {}),
+      short_url: '0',
+      // MSG91 wants the number without the leading +.
+      recipients: [{ mobiles: message.to.replace(/^\+/, ''), otp: message.vars?.otp, minutes: String(message.vars?.minutes ?? '') }],
+    }),
+  });
+  // MSG91 answers 200 with {"type":"error"} for most failures, including a bad auth key.
+  const detail = String(data.message ?? 'no detail');
+  if (status >= 300 || data.type === 'error') throw providerFailure('msg91', /auth/i.test(detail) && status < 300 ? 401 : status, detail);
+  logger.info({ provider: 'msg91', httpStatus: status, requestId: data.message }, '[SMS] provider response: accepted');
+  return detail;
+}
+
+/**
+ * 2Factor.in OTP SMS: GET /API/V1/{key}/SMS/{number}/{otp}[/{template}].
+ * The message text is 2Factor's DLT-approved OTP template, so `body` is not
+ * sent. Replies {"Status":"Success","Details":"<session id>"}; an unknown key
+ * is HTTP 400 with Details "Invalid API Key".
+ */
+async function twoFactor(message: SmsMessage): Promise<string> {
+  const { TWOFACTOR_API_KEY: apiKey, TWOFACTOR_TEMPLATE_NAME: template } = env;
+  if (!apiKey) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=2factor needs TWOFACTOR_API_KEY');
+  const otp = message.vars?.otp;
+  if (!otp) throw new SmsError('SMS_DELIVERY_FAILED', '2factor only sends OTP messages');
+
+  // The key is part of the URL, so the URL itself is never logged.
+  const path = [apiKey, 'SMS', message.to.replace(/^\+/, ''), otp, ...(template ? [template] : [])].map(encodeURIComponent).join('/');
+  const { status, data } = await post('2factor', `https://2factor.in/API/V1/${path}`, { method: 'GET' });
+  const detail = String(data.Details ?? 'no detail');
+  if (status >= 300 || data.Status !== 'Success') throw providerFailure('2factor', /api key/i.test(detail) ? 401 : status >= 300 ? status : 400, detail);
+  logger.info({ provider: '2factor', httpStatus: status, sessionId: detail }, '[SMS] provider response: accepted');
+  return detail;
+}
+
+/**
+ * Brevo SMS credits left, from the account's plan list ({type:'sms', credits}).
+ * Brevo accepts a send with no credits (201) and only rejects it afterwards,
+ * so without this check a code would be reported as sent when it never is.
+ * Null when the account cannot be read — the send is then tried anyway.
+ */
+async function brevoSmsCredits(apiKey: string): Promise<number | null> {
+  try {
+    const res = await fetch('https://api.brevo.com/v3/account', {
+      headers: { 'api-key': apiKey, accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const { plan } = (await res.json()) as { plan?: { type?: string; credits?: number }[] };
+    return (plan ?? []).filter((p) => p.type === 'sms').reduce((sum, p) => sum + (p.credits ?? 0), 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Brevo transactional SMS (POST /v3/transactionalSMS/send). Answers 201 with a
+ * messageId; delivery happens afterwards and shows in Brevo → SMS → Logs. A bad
+ * key or an IP not on the account's authorised list is 401.
+ */
+async function brevo(message: SmsMessage): Promise<string> {
+  const { BREVO_API_KEY: apiKey, BREVO_SMS_SENDER: sender } = env;
+  if (!apiKey) throw new SmsError('SMS_NOT_CONFIGURED', 'SMS_PROVIDER=brevo needs BREVO_API_KEY (an xkeysib- API key)');
+  if (apiKey.startsWith('xsmtpsib-')) throw new SmsError('SMS_NOT_CONFIGURED', 'BREVO_API_KEY is an SMTP key (xsmtpsib-); SMS needs an API key (xkeysib-)');
+
+  const credits = await brevoSmsCredits(apiKey);
+  if (credits === 0) {
+    logger.error({ provider: 'brevo' }, '[SMS] provider response: not sent — the Brevo account has no SMS credits; buy them under Brevo → SMS');
+    throw new SmsError('SMS_DELIVERY_FAILED', 'Brevo account has no SMS credits');
+  }
+
+  const { status, data } = await post('brevo', 'https://api.brevo.com/v3/transactionalSMS/send', {
+    headers: { 'api-key': apiKey, 'Content-Type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ sender, recipient: message.to.replace(/^\+/, ''), content: message.body, type: 'transactional' }),
+  });
+  if (status >= 300) {
+    const detail = String(data.message ?? data.code ?? 'no detail');
+    const hint =
+      status === 401 && /ip address/i.test(detail)
+        ? ' — allow this server\'s IP at https://app.brevo.com/security/authorised_ips'
+        : status === 402 || /credit/i.test(detail)
+          ? ' — the Brevo account has no SMS credits; buy them under Brevo → SMS'
+          : '';
+    throw providerFailure('brevo', status, `${detail}${hint}`);
+  }
+  logger.info({ provider: 'brevo', httpStatus: status, messageId: data.messageId, smsCredits: credits }, '[SMS] provider response: accepted (delivery status in Brevo → SMS → Logs)');
+  return String(data.messageId ?? 'brevo');
+}
+
+// ── Twilio Verify ───────────────────────────────────────────
+// Verify sends from Twilio's own numbers (no TWILIO_FROM) and generates the
+// code itself; it is checked back through VerificationCheck.
+
+const verifyAuth = () => {
+  const { TWILIO_ACCOUNT_SID: sid, TWILIO_AUTH_TOKEN: token, TWILIO_VERIFY_SERVICE_SID: service } = env;
+  if (!sid || !token || !service) throw new SmsError('SMS_NOT_CONFIGURED', 'Twilio Verify needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_VERIFY_SERVICE_SID');
+  return {
+    base: `https://verify.twilio.com/v2/Services/${encodeURIComponent(service)}`,
+    headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+  };
+};
+
+const VERIFY_HINTS: Record<number, string> = {
+  20003: 'TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN are wrong',
+  20404: 'TWILIO_VERIFY_SERVICE_SID does not exist on this account',
+  21608: 'trial account: verify this recipient in Twilio Console → Phone Numbers → Verified Caller IDs, or upgrade the account',
+  60200: 'the recipient number is not valid',
+  60203: 'too many codes sent to this number — wait 10 minutes',
+  60205: 'this number cannot receive SMS (landline?)',
+  60410: 'this number/country is blocked for Verify — Twilio Console → Verify → Geo permissions',
+};
+
+async function twilioVerifyStart(to: string): Promise<string> {
+  const { base, headers } = verifyAuth();
+  const { status, data } = await post('twilio-verify', `${base}/Verifications`, { headers, body: new URLSearchParams({ To: to, Channel: 'sms' }) });
+  if (status >= 300) {
+    const hint = VERIFY_HINTS[Number(data.code)];
+    throw providerFailure('twilio-verify', status, `${data.code ?? ''} ${data.message ?? 'no detail'}${hint ? ` — ${hint}` : ''}`.trim());
+  }
+  logger.info({ provider: 'twilio-verify', httpStatus: status, verificationSid: data.sid, providerStatus: data.status }, '[SMS] provider response: accepted');
+  return String(data.sid ?? 'twilio-verify');
+}
+
+export const smsService = {
+  /** True when the provider makes its own code (Twilio Verify), so the SMS code differs from the emailed one. */
+  providerGeneratesCode(): boolean {
+    return env.SMS_PROVIDER === 'twilio' && Boolean(env.TWILIO_VERIFY_SERVICE_SID);
+  },
+
+  /** Checks a code the provider generated. Any failure reads as "not approved" and is logged. */
+  async checkOtp(to: string, code: string): Promise<boolean> {
+    if (!smsService.providerGeneratesCode()) return false;
+    try {
+      const { base, headers } = verifyAuth();
+      const { status, data } = await post('twilio-verify', `${base}/VerificationCheck`, { headers, body: new URLSearchParams({ To: to, Code: code }) });
+      // 404: no pending verification for this number (already approved, expired, or never sent).
+      if (status === 404) return false;
+      if (status >= 300) {
+        logger.error({ provider: 'twilio-verify', httpStatus: status, detail: `${data.code ?? ''} ${data.message ?? ''}`.trim() }, '[SMS] code check failed');
+        return false;
+      }
+      logger.info({ provider: 'twilio-verify', to: tail(to), providerStatus: data.status }, '[SMS] code checked');
+      return data.status === 'approved';
+    } catch (err) {
+      logger.error({ provider: 'twilio-verify', reason: err instanceof Error ? err.message : String(err) }, '[SMS] code check failed');
+      return false;
+    }
+  },
+
+  /** Sends one SMS through SMS_PROVIDER and returns the provider's message id. Throws SmsError. */
+  async sendMessage(message: SmsMessage): Promise<string> {
+    logger.info({ provider: env.SMS_PROVIDER, to: tail(message.to) }, '[SMS] OTP sending');
+    if (env.SMS_PROVIDER === 'log') {
+      // Nothing leaves the machine. Outside production the text is logged so a
+      // developer without an SMS account can still read the code.
+      logger.warn({ to: tail(message.to), ...(isProd ? {} : { body: message.body }) }, '[SMS] not sent — SMS_PROVIDER=log, no SMS provider configured');
+      throw new SmsError('SMS_NOT_CONFIGURED', 'No SMS provider is configured (SMS_PROVIDER=log)');
+    }
+    if (!isProd && !env.SMS_ALLOW_REAL_SEND) {
+      logger.warn({ provider: env.SMS_PROVIDER }, '[SMS] not sent — set SMS_ALLOW_REAL_SEND=true to text real phones outside production');
+      throw new SmsError('SMS_BLOCKED_IN_DEVELOPMENT', `SMS_PROVIDER=${env.SMS_PROVIDER} reaches real phones; set SMS_ALLOW_REAL_SEND=true to allow it outside production`);
+    }
+    if (env.SMS_PROVIDER === 'twilio') return smsService.providerGeneratesCode() ? twilioVerifyStart(message.to) : twilio(message);
+    if (env.SMS_PROVIDER === '2factor') return twoFactor(message);
+    if (env.SMS_PROVIDER === 'brevo') return brevo(message);
+    return msg91(message);
+  },
+
+  /**
+   * The OTP text for Twilio/log; MSG91 uses its DLT template with the same
+   * values. With Twilio Verify the text and code are Twilio's, not these.
+   */
+  sendOtp(to: string, otp: string, minutes: number): Promise<string> {
+    return smsService.sendMessage({
+      to,
+      body: `Your TimeFlow verification code is ${otp}. It will expire in ${minutes} minutes. Do not share it with anyone.`,
+      vars: { otp, minutes },
+    });
+  },
+};

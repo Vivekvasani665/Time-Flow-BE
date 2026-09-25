@@ -18,7 +18,7 @@ async function build(actor: AuthContext) {
   const tScope = taskScope(actor);
 
   const [totalUsers, activeUsers, projectGroups, taskGroups, recentProjectRecords, recentActivity, myTasks] = await Promise.all([
-    canUsers ? prisma.user.count({ where: { deletedAt: null } }) : null,
+    canUsers ? prisma.user.count({ where: { deletedAt: null, status: { not: 'PENDING' } } }) : null,
     canUsers ? prisma.user.count({ where: { deletedAt: null, status: 'ACTIVE' } }) : null,
     canProjects ? prisma.project.groupBy({ by: ['status'], where: pScope, _count: { _all: true } }) : [],
     canTasks ? prisma.task.groupBy({ by: ['status'], where: tScope, _count: { _all: true } }) : [],

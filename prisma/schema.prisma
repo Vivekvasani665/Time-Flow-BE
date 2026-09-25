@@ -15,6 +15,8 @@ datasource db {
 enum UserStatus {
   ACTIVE
   INACTIVE
+  /// Self-registered, but the signup OTP has not been verified yet. Cannot sign in.
+  PENDING
 }
 
 enum ProjectStatus {
@@ -59,6 +61,8 @@ model User {
   /// Always stored lower-cased. Uniqueness among non-deleted users is enforced
   /// by the partial unique index `users_email_active_key` (see migration SQL).
   email        String     @db.VarChar(254)
+  /// Digits-only uniqueness among non-deleted users is enforced by the partial
+  /// expression index `users_phone_active_key` (see migration SQL).
   phone        String?    @db.VarChar(32)
   passwordHash String     @map("password_hash")
   avatarUrl    String?    @map("avatar_url")
@@ -71,8 +75,10 @@ model User {
   /// settings need no migration; the server validates the shape on write.
   preferences  Json       @default("{}")
 
-  /// TOTP two-factor authentication. Secrets are AES-256-GCM encrypted
-  /// (see encryptSecret); the pending secret holds an unconfirmed setup.
+  /// Two-factor authentication. On when the user has at least one method: an
+  /// authenticator app (twoFactorSecret set) and/or passkeys (webauthnCredentials).
+  /// TOTP secrets are AES-256-GCM encrypted (see encryptSecret); the pending
+  /// secret holds an unconfirmed setup, finished in Settings or at next sign-in.
   twoFactorEnabled       Boolean   @default(false) @map("two_factor_enabled")
   twoFactorSecret        String?   @map("two_factor_secret")
   twoFactorPendingSecret String?   @map("two_factor_pending_secret")
@@ -94,8 +100,15 @@ model User {
   notifications   Notification[]
   refreshTokens   RefreshToken[]
   recoveryCodes   TwoFactorRecoveryCode[]
+  passkeys        WebAuthnCredential[]
+  loginOtps       LoginOtp[]
+  signupOtps      SignupOtp[]
   emailsReceived  EmailLog[]              @relation("EmailsReceived")
   emailsSent      EmailLog[]              @relation("EmailsSent")
+  passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
+  requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
+  sentInvitations UserInvitation[]        @relation("InvitationSender")
+  invitation      UserInvitation?         @relation("InvitationAcceptedUser")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -114,6 +127,7 @@ model Role {
 
   users       User[]
   permissions RolePermission[]
+  invitations UserInvitation[]
 
   @@map("roles")
 }
@@ -249,6 +263,30 @@ model Notification {
   @@map("notifications")
 }
 
+/// A passkey (WebAuthn credential) used as a second factor: Face ID, Touch ID,
+/// Windows Hello, a device PIN or a security key.
+model WebAuthnCredential {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// Base64url credential id, as the browser reports it.
+  credentialId String    @unique @map("credential_id") @db.VarChar(1024)
+  /// COSE-encoded public key. Nothing secret is stored.
+  publicKey    Bytes     @map("public_key")
+  /// Signature counter; a counter that goes backwards suggests a cloned key.
+  counter      BigInt    @default(0)
+  transports   String[]  @db.VarChar(32)
+  name         String    @db.VarChar(80)
+  /// Synced across devices (e.g. iCloud Keychain, Google Password Manager).
+  backedUp     Boolean   @default(false) @map("backed_up")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUsedAt   DateTime? @map("last_used_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
+}
+
 /// Single-use backup codes for when the authenticator app is unavailable.
 model TwoFactorRecoveryCode {
   id        String    @id @default(uuid()) @db.Uuid
@@ -262,6 +300,121 @@ model TwoFactorRecoveryCode {
 
   @@unique([userId, codeHash])
   @@map("two_factor_recovery_codes")
+}
+
+/// One-time code that must follow the password when LOGIN_OTP_ENABLED is on.
+/// The same code goes by email and, if the account has a mobile number, SMS. One row per sign-in attempt: its id is the `verificationId` the
+/// client holds, and a resend rotates the code on the same row.
+model LoginOtp {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// HMAC-SHA256 of the code, keyed by a server secret. A plain hash of a
+  /// 6-digit number could be reversed by trying all million values.
+  otpHash    String    @map("otp_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Wrong guesses against the current code; reset when a new code is sent.
+  attempts   Int       @default(0)
+  sendCount  Int       @default(1) @map("send_count")
+  lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  /// Channels the current code was delivered on, e.g. {email,sms}.
+  channels   String[]  @default([]) @db.VarChar(10)
+  usedAt     DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("login_otps")
+}
+
+/// One-time code that activates a self-registered (PENDING) account. The same
+/// code goes to the email address and the mobile number; its id is the
+/// `verificationId` the client holds, and a resend rotates the code on the
+/// same row.
+model SignupOtp {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  /// HMAC-SHA256 of the code, keyed by a server secret (see signup-otp.service).
+  otpHash    String    @map("otp_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Wrong guesses against the current code; reset when a new code is sent.
+  attempts   Int       @default(0)
+  sendCount  Int       @default(1) @map("send_count")
+  lastSentAt DateTime  @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  /// Channels the current code was delivered on, e.g. {email,sms}.
+  channels   String[]  @default([]) @db.VarChar(10)
+  verifiedAt DateTime? @map("verified_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("signup_otps")
+}
+
+enum PasswordResetStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
+
+/// An administrator-issued password reset link. Only a SHA-256 of the token is
+/// stored; the raw token exists only in the emailed link. At most one PENDING
+/// row per user — issuing a new link cancels the previous one.
+model PasswordResetRequest {
+  id            String              @id @default(uuid()) @db.Uuid
+  userId        String              @map("user_id") @db.Uuid
+  requestedById String?             @map("requested_by_id") @db.Uuid
+  tokenHash     String              @unique @map("token_hash") @db.VarChar(64)
+  status        PasswordResetStatus @default(PENDING)
+  expiresAt     DateTime            @map("expires_at") @db.Timestamptz(3)
+  completedAt   DateTime?           @map("completed_at") @db.Timestamptz(3)
+  cancelledAt   DateTime?           @map("cancelled_at") @db.Timestamptz(3)
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user        User  @relation("PasswordResetTarget", fields: [userId], references: [id], onDelete: Cascade)
+  requestedBy User? @relation("PasswordResetRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("password_reset_requests")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+/// A Super Admin's invitation for a new member. Holds only the email and role;
+/// the User row is created when the invitee sets their password through the
+/// link. Only a SHA-256 of the token is stored, and the link works once. At most
+/// one PENDING row per email — inviting again revokes the previous link.
+model UserInvitation {
+  id             String           @id @default(uuid()) @db.Uuid
+  /// Always stored lower-cased.
+  email          String           @db.VarChar(254)
+  roleId         String           @map("role_id") @db.Uuid
+  invitedById    String?          @map("invited_by_id") @db.Uuid
+  tokenHash      String           @unique @map("token_hash") @db.VarChar(64)
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime         @map("expires_at") @db.Timestamptz(3)
+  acceptedUserId String?          @unique @map("accepted_user_id") @db.Uuid
+  acceptedAt     DateTime?        @map("accepted_at") @db.Timestamptz(3)
+  revokedAt      DateTime?        @map("revoked_at") @db.Timestamptz(3)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  role         Role  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  invitedBy    User? @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: SetNull)
+  acceptedUser User? @relation("InvitationAcceptedUser", fields: [acceptedUserId], references: [id], onDelete: SetNull)
+
+  @@index([email, createdAt])
+  @@index([status, createdAt])
+  @@map("user_invitations")
 }
 
 model RefreshToken {

@@ -27,6 +27,7 @@
     "@bull-board/api": "^9.10.1",
     "@bull-board/express": "^9.10.1",
     "@prisma/client": "~6.19.3",
+    "@simplewebauthn/server": "^14.0.2",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.81.5",
     "cookie-parser": "^1.4.7",

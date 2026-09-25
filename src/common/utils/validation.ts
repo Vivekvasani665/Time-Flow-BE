@@ -32,6 +32,15 @@ export const passwordSchema = z
   .regex(/[A-Za-z]/, 'Password must contain a letter')
   .regex(/\d/, 'Password must contain a number');
 
+/**
+ * Stricter policy for passwords chosen through a reset link. Registration and
+ * admin-set passwords keep `passwordSchema`, so existing accounts are unaffected.
+ */
+export const strongPasswordSchema = passwordSchema
+  .regex(/[A-Z]/, 'Password must contain an uppercase letter')
+  .regex(/[a-z]/, 'Password must contain a lowercase letter')
+  .regex(/[^A-Za-z0-9]/, 'Password must contain a special character');
+
 export const emailSchema = z
   .string({ message: 'Email is required' })
   .trim()

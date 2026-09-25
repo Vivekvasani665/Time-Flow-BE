@@ -24,6 +24,8 @@ type Layout = {
   /** Quoted block — a message body, a task description. */
   quote?: string;
   cta?: { label: string; url: string };
+  /** A one-time code, shown large and monospaced. */
+  code?: string;
   footer?: string;
 };
 
@@ -54,6 +56,10 @@ ${rows
     ? `<div style="background:#f9fafb;border:1px solid #eef0f3;border-radius:8px;padding:14px 16px;margin:16px 0;line-height:1.6;color:#374151;font-size:14px">${prose(l.quote)}</div>`
     : '';
 
+  const codeHtml = l.code
+    ? `<p style="margin:20px 0;text-align:center"><span style="display:inline-block;background:#f9fafb;border:1px solid #e6e8ec;border-radius:10px;padding:14px 22px;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:30px;font-weight:700;letter-spacing:8px;color:#111827">${escapeHtml(l.code)}</span></p>`
+    : '';
+
   const ctaHtml = l.cta
     ? `<p style="margin:24px 0 4px"><a href="${l.cta.url}" style="display:inline-block;background:${ACCENT};color:#ffffff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">${escapeHtml(
         l.cta.label,
@@ -73,6 +79,7 @@ ${rows
       <h1 style="color:#111827;font-size:20px;line-height:1.3;font-weight:600;margin:0 0 ${l.intro ? '6px' : '16px'}">${escapeHtml(l.heading)}</h1>
       ${l.intro ? `<p style="color:#4b5563;font-size:14px;line-height:1.5;margin:0 0 16px">${escapeHtml(l.intro)}</p>` : ''}
       ${rowsHtml}
+      ${codeHtml}
       ${quoteHtml}
       ${ctaHtml}
       </td>
@@ -91,6 +98,7 @@ function plain(l: Layout & { salutation?: string }): string {
     l.salutation,
     l.heading,
     l.intro,
+    l.code ? `Your code: ${l.code}` : '',
     rows.map((r) => `${r.label}: ${r.value}`).join('\n'),
     l.quote,
     l.cta ? `${l.cta.label}: ${l.cta.url}` : '',
@@ -186,4 +194,70 @@ export function renderEmail(template: EmailTemplate, to: string, vars: Record<st
       throw new Error(`Unknown email template: ${String(exhaustive)}`);
     }
   }
+}
+
+/**
+ * Sent directly rather than through the queue: the queue keeps a copy of every
+ * message in email_logs, and a sign-in code must never be stored in clear.
+ */
+export function renderLoginOtpEmail(to: string, vars: { firstName: string; code: string; minutes: number }): MailMessage {
+  const l: Layout = {
+    kicker: 'Sign-in verification',
+    heading: 'Your verification code',
+    intro: `Hi ${vars.firstName || 'there'}, use this code to finish signing in to TimeFlow. It replaces any code from an earlier email.`,
+    code: vars.code,
+    rows: [{ label: 'Expires in', value: `${vars.minutes} minutes` }],
+    footer:
+      'Never share this code — TimeFlow staff will never ask for it. If you did not just try to sign in, someone has your password: contact your administrator to have it reset.',
+  };
+  return {
+    to,
+    // The code leads the subject so the newest one is readable from the inbox
+    // list. It also makes every subject unique, which stops Gmail collapsing a
+    // run of sign-in attempts into one thread where an older, dead code is the
+    // first thing you see.
+    subject: `${vars.code} is your TimeFlow sign-in code`,
+    html: layout(l),
+    text: [plain({ ...l, salutation: `Hi ${vars.firstName || 'there'},` }), l.footer].join('\n\n'),
+  };
+}
+
+/** Sent directly, like the sign-in code, so the code never lands in email_logs. */
+export function renderSignupOtpEmail(to: string, vars: { firstName: string; code: string; minutes: number }): MailMessage {
+  const l: Layout = {
+    kicker: 'Account verification',
+    heading: 'Verify your TimeFlow account',
+    intro: `Hi ${vars.firstName || 'there'}, use this code to finish creating your TimeFlow account. The same code was also sent to your mobile number.`,
+    code: vars.code,
+    rows: [{ label: 'Expires in', value: `${vars.minutes} minutes` }],
+    footer: 'Never share this code — TimeFlow staff will never ask for it. If you did not sign up for TimeFlow, you can ignore this email.',
+  };
+  return {
+    to,
+    subject: `${vars.code} is your TimeFlow verification code`,
+    html: layout(l),
+    text: [plain({ ...l, salutation: `Hi ${vars.firstName || 'there'},` }), l.footer].join('\n\n'),
+  };
+}
+
+/**
+ * Sent directly rather than through the queue: the queue keeps a copy of every
+ * message in email_logs, and a live reset link must never be stored in clear.
+ */
+export function renderPasswordResetEmail(to: string, vars: { firstName: string; resetUrl: string; minutes: number }): MailMessage {
+  const l: Layout = {
+    kicker: 'Password reset',
+    heading: 'Reset your TimeFlow password',
+    intro: `Hi ${vars.firstName || 'there'}, an administrator requested a password reset for your TimeFlow account. Use the button below to choose a new password.`,
+    rows: [{ label: 'Link expires in', value: `${vars.minutes} minutes` }],
+    cta: { label: 'Reset password', url: vars.resetUrl },
+    footer:
+      'The link works once. If you did not expect this request, contact your administrator. TimeFlow staff will never ask you for your password.',
+  };
+  return {
+    to,
+    subject: 'Reset Your Time-Flow Password',
+    html: layout(l),
+    text: [plain({ ...l, salutation: `Hi ${vars.firstName || 'there'},` }), l.footer].join('\n\n'),
+  };
 }

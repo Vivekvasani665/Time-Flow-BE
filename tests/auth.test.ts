@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { prisma } from '../src/lib/prisma';
-import { api, EMAILS, loginAs, nextIp, PASSWORD, unique } from './helpers';
+import { api, EMAILS, loginAs, nextIp, PASSWORD } from './helpers';
 
 const cookieValue = (setCookie: string[] | undefined, name: string) =>
   setCookie?.find((c) => c.startsWith(`${name}=`))?.split(';')[0]?.slice(name.length + 1) ?? null;
@@ -79,44 +79,7 @@ describe('POST /api/auth/login', () => {
   });
 });
 
-describe('POST /api/auth/register', () => {
-  const register = (body: Record<string, unknown>) => api().post('/api/auth/register').set('X-Forwarded-For', nextIp()).send(body);
-  const newUser = () => ({ firstName: 'Sam', lastName: 'Rivera', email: `${unique('signup')}@timeflow.dev`, password: 'Signup1234' });
-
-  it('creates an active Employee, signs them in and sets session cookies', async () => {
-    const body = newUser();
-    const res = await register(body);
-    expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ success: true, data: { user: { email: body.email, status: 'ACTIVE', role: { name: 'Employee' } } } });
-    expect(res.body.data.user).not.toHaveProperty('passwordHash');
-    const cookies = (res.headers['set-cookie'] as unknown as string[]).join('\n');
-    expect(cookies).toMatch(/tf_access=.*HttpOnly/);
-    expect(cookies).toMatch(/tf_refresh=.*HttpOnly/);
-
-    const login = await api().post('/api/auth/login').set('X-Forwarded-For', nextIp()).send({ email: body.email, password: body.password });
-    expect(login.status).toBe(200);
-  });
-
-  it('rejects an email that is already registered', async () => {
-    const res = await register({ ...newUser(), email: EMAILS.manager });
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('USER_EMAIL_EXISTS');
-  });
-
-  it('refuses a client-chosen role or status', async () => {
-    const res = await register({ ...newUser(), roleId: '00000000-0000-0000-0000-000000000000', status: 'ACTIVE' });
-    expect(res.status).toBe(400);
-    expect(await prisma.user.count({ where: { firstName: 'Sam', role: { name: { not: 'Employee' } } } })).toBe(0);
-  });
-
-  it('validates the body', async () => {
-    const res = await register({ firstName: '', lastName: 'X', email: 'not-an-email', password: 'short' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('VALIDATION_ERROR');
-    const paths = res.body.details.map((d: { path: string }) => d.path);
-    expect(paths).toEqual(expect.arrayContaining(['firstName', 'email', 'password']));
-  });
-});
+// Self-service sign-up (register → OTP → verify) is covered in signup-otp.test.ts.
 
 describe('GET /api/auth/me', () => {
   it('returns the current user via cookie', async () => {

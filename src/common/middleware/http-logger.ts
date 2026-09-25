@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import pinoHttp from 'pino-http';
-import { logger } from '../../lib/logger';
+import { logger, redactUrl } from '../../lib/logger';
 
 const REQUEST_ID_RE = /^[\w-]{8,64}$/;
 
@@ -28,13 +28,13 @@ export const httpLogger = pinoHttp({
     req: (req: { id: string; method: string; url: string; remoteAddress?: string; raw?: Partial<Request> }) => ({
       id: req.id,
       method: req.method,
-      url: req.raw?.originalUrl ?? req.url,
+      url: redactUrl(req.raw?.originalUrl ?? req.url),
       ip: req.raw?.ip ?? req.remoteAddress,
     }),
     res: (res: { statusCode: number }) => ({ statusCode: res.statusCode }),
   },
   customSuccessMessage: (req, res, responseTime) =>
-    `${req.method} ${(req as Partial<Request>).originalUrl ?? req.url} ${res.statusCode} ${Math.round(responseTime)}ms`,
-  customErrorMessage: (req, res) => `${req.method} ${(req as Partial<Request>).originalUrl ?? req.url} ${res.statusCode}`,
+    `${req.method} ${redactUrl((req as Partial<Request>).originalUrl ?? req.url)} ${res.statusCode} ${Math.round(responseTime)}ms`,
+  customErrorMessage: (req, res) => `${req.method} ${redactUrl((req as Partial<Request>).originalUrl ?? req.url)} ${res.statusCode}`,
   customAttributeKeys: { responseTime: 'responseTimeMs' },
 });

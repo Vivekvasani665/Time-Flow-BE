@@ -1,6 +1,6 @@
 import type { Request, RequestHandler } from 'express';
 import { redis } from '../../lib/redis';
-import { logger } from '../../lib/logger';
+import { logger, redactUrl } from '../../lib/logger';
 import { SlidingWindowRateLimiter } from '../../cache/rate-limiter';
 import { RateLimitError } from '../errors';
 
@@ -37,7 +37,7 @@ export function rateLimit({ name, limit, windowSeconds, message, identify }: Opt
     if (!decision.allowed) {
       const retryAfter = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
       res.setHeader('Retry-After', retryAfter);
-      logger.warn({ limiter: name, ip: identifier, route: req.originalUrl }, 'rate limit exceeded');
+      logger.warn({ limiter: name, ip: identifier, route: redactUrl(req.originalUrl) }, 'rate limit exceeded');
       return next(new RateLimitError(retryAfter, message));
     }
     return next();

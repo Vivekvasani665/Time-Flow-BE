@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { producers } from '../src/queue/producers';
-import { api, loginAs, roleId, unique, type Session } from './helpers';
+import { api, loginAs, roleId, unique, uniquePhone, type Session } from './helpers';
 
 let superadmin: Session;
 let admin: Session;
@@ -16,7 +16,7 @@ const newUser = (overrides: Record<string, unknown> = {}) => ({
   firstName: 'Jamie',
   lastName: 'Rivera',
   email: `${unique('jamie')}@timeflow.dev`,
-  phone: '+1 555 010 2030',
+  phone: uniquePhone(),
   password: 'Str0ngPass',
   roleId: employeeRoleId,
   ...overrides,
@@ -107,5 +107,32 @@ describe('User authorization', () => {
   it('prevents users from deleting or deactivating themselves', async () => {
     expect((await superadmin.auth(api().delete(`/api/users/${superadmin.userId}`))).status).toBe(403);
     expect((await superadmin.auth(api().patch(`/api/users/${superadmin.userId}/status`)).send({ status: 'INACTIVE' })).status).toBe(403);
+  });
+});
+
+describe('User mobile numbers', () => {
+  it('refuses a number another user already has, whatever its formatting', async () => {
+    const admin = await loginAs('admin');
+    const role = await roleId('Employee');
+    const body = (phone: string) => ({ firstName: 'Pat', lastName: 'Lee', email: `${unique('phone')}@timeflow.dev`, password: 'Str0ngPass', roleId: role, phone });
+    const phone = uniquePhone();
+    await admin.auth(api().post('/api/users')).send(body(phone)).expect(201);
+    const dup = await admin.auth(api().post('/api/users')).send(body(`${phone.slice(0, 3)} ${phone.slice(3)}`));
+    expect(dup.status).toBe(409);
+    expect(dup.body.code).toBe('USER_PHONE_EXISTS');
+  });
+});
+
+describe('User mobile number format', () => {
+  it('stores E.164 and rejects a number without a country code', async () => {
+    const admin = await loginAs('admin');
+    const role = await roleId('Employee');
+    const base = { firstName: 'Ria', lastName: 'Rao', password: 'Str0ngPass', roleId: role };
+    const digits = uniquePhone().slice(3);
+    const created = await admin.auth(api().post('/api/users')).send({ ...base, email: `${unique('e164')}@timeflow.dev`, phone: `+91 ${digits.slice(0, 5)}-${digits.slice(5)}` });
+    expect(created.status).toBe(201);
+    expect(created.body.data.phone).toBe(`+91${digits}`);
+    const bad = await admin.auth(api().post('/api/users')).send({ ...base, email: `${unique('e164')}@timeflow.dev`, phone: '98765 43210' });
+    expect(bad.status).toBe(400);
   });
 });

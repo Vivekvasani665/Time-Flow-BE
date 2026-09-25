@@ -13,6 +13,7 @@ import type { CreateUserInput, ListUsersQuery, UpdateUserInput } from './user.sc
 import { userRefSelect } from '../../common/http/selects';
 
 const EMAIL_EXISTS = () => new ConflictError('Email already exists', 'USER_EMAIL_EXISTS');
+const PHONE_EXISTS = () => new ConflictError('An account with this mobile number already exists', 'USER_PHONE_EXISTS');
 
 async function assertRoleExists(roleId: string): Promise<{ id: string; name: string }> {
   const role = await prisma.role.findUnique({ where: { id: roleId }, select: { id: true, name: true } });
@@ -62,6 +63,7 @@ export const userService = {
     const role = await assertRoleExists(input.roleId);
     await rbacService.assertCanManageRole(ctx.actor, role.id, 'You cannot assign a role with permissions you do not have');
     if (await userRepository.emailTaken(input.email)) throw EMAIL_EXISTS();
+    if (input.phone && (await userRepository.phoneTaken(input.phone))) throw PHONE_EXISTS();
 
     // Explicit field whitelist — request bodies are never spread into Prisma.
     const user = await prisma.user.create({
@@ -105,6 +107,7 @@ export const userService = {
       newRoleName = role.name;
     }
     if (input.email && input.email !== target.email && (await userRepository.emailTaken(input.email, id))) throw EMAIL_EXISTS();
+    if (input.phone && (await userRepository.phoneTaken(input.phone, { excludeId: id }))) throw PHONE_EXISTS();
 
     const changed = (Object.keys(input) as (keyof UpdateUserInput)[]).filter((key) => {
       if (key === 'password') return true;

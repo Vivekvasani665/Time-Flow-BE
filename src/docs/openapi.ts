@@ -128,6 +128,8 @@ const priority = enumOf('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
 const projectStatus = enumOf('PLANNING', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'ARCHIVED');
 const taskStatus = enumOf('TODO', 'IN_PROGRESS', 'REVIEW', 'COMPLETED');
 const userStatus = enumOf('ACTIVE', 'INACTIVE');
+/** PENDING = signed up, sign-up code not verified yet. Readable and filterable, never settable. */
+const userStatusAny = enumOf('ACTIVE', 'INACTIVE', 'PENDING');
 
 export const openApiDocument = {
   openapi: '3.0.3',
@@ -144,6 +146,8 @@ export const openApiDocument = {
   tags: [
     { name: 'Auth' },
     { name: 'Users' },
+    { name: 'Password Resets' },
+    { name: 'Invitations', description: 'Super Admin → invite link → set password → login. No direct user creation.' },
     { name: 'Roles' },
     { name: 'Projects' },
     { name: 'Tasks' },
@@ -171,10 +175,11 @@ export const openApiDocument = {
     schemas: {
       Error: {
         type: 'object',
-        required: ['success', 'message', 'code'],
+        required: ['success', 'statusCode', 'message', 'code'],
         properties: {
           success: { type: 'boolean', example: false },
-          message: str(),
+          statusCode: { ...int, example: 400 },
+          message: str({ description: 'Safe to show to users. 5xx responses never carry internal details.' }),
           code: str(),
           details: arrayOf({ type: 'object', properties: { path: str(), message: str() } }),
           requestId: str(),
@@ -198,7 +203,7 @@ export const openApiDocument = {
           email: str(),
           phone: nullable(str()),
           avatarUrl: nullable(str()),
-          status: userStatus,
+          status: userStatusAny,
           role: ref('RoleRef'),
           permissions: arrayOf(str({ example: 'users.view' })),
           twoFactorEnabled: bool,
@@ -210,8 +215,97 @@ export const openApiDocument = {
         type: 'object',
         properties: {
           twoFactorRequired: { type: 'boolean', example: true },
-          challengeToken: str({ description: 'Post back to `/api/auth/login/2fa` with a code.' }),
+          challengeToken: str({ description: 'Post back to `/api/auth/login/2fa` with a code, or use it for a passkey sign-in.' }),
           challengeExpiresAt: dateTime,
+          methods: arrayOf(enumOf('totp', 'passkey', 'recovery')),
+        },
+      },
+      TwoFactorSetupChallenge: {
+        type: 'object',
+        description: 'Password accepted; 2FA is off but an authenticator setup is pending. Show the QR, then post a code to `/api/auth/login/2fa/setup`.',
+        properties: {
+          twoFactorSetupRequired: { type: 'boolean', example: true },
+          challengeToken: str(),
+          challengeExpiresAt: dateTime,
+          setup: { type: 'object', properties: { secret: str(), otpauthUrl: str(), qrCodeDataUrl: str({ example: 'data:image/png;base64,...' }) } },
+        },
+      },
+      Passkey: {
+        type: 'object',
+        properties: { id: str({ format: 'uuid' }), name: str({ example: 'Chrome on macOS' }), backedUp: bool, createdAt: dateTime, lastUsedAt: nullable(dateTime) },
+      },
+      LoginOtpChallenge: {
+        type: 'object',
+        properties: {
+          requiresOtp: { type: 'boolean', example: true },
+          verificationId: uuid,
+          email: str({ example: 'v****@gmail.com', description: 'Where the code was sent, masked.' }),
+          phone: nullable(str({ example: '+91******3210', description: 'The account mobile number, masked; null when it has none (email only).' })),
+          channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          emailSent: bool,
+          smsSent: bool,
+          delivery: {
+            type: 'object',
+            description:
+              'Per-channel outcome. A failed channel carries a safe code: EMAIL_DELIVERY_FAILED, INVALID_PHONE_NUMBER, SMS_NOT_CONFIGURED, ' +
+              'SMS_BLOCKED_IN_DEVELOPMENT, SMS_PROVIDER_AUTH_FAILED, SMS_PROVIDER_UNAVAILABLE or SMS_DELIVERY_FAILED.',
+            example: { email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_NOT_CONFIGURED' } },
+          },
+          expiresAt: dateTime,
+          resendAvailableAt: dateTime,
+          expiresInSeconds: { ...int, example: 300 },
+          resendAvailableInSeconds: { ...int, example: 60 },
+        },
+      },
+      SignupOtpChallenge: {
+        type: 'object',
+        properties: {
+          requiresVerification: { type: 'boolean', example: true },
+          verificationId: uuid,
+          email: str({ example: 's****@company.com', description: 'Where the code was sent, masked.' }),
+          phone: str({ example: '+91******3210', description: 'Where the code was sent, masked.' }),
+          channels: { type: 'array', items: enumOf('email', 'sms'), description: 'Channels the current code actually reached.' },
+          emailSent: bool,
+          smsSent: bool,
+          delivery: {
+            type: 'object',
+            description: 'Per-channel outcome with safe failure codes (see LoginOtpChallenge). The account is still created (201) when one channel works.',
+            example: { email: { status: 'sent' }, sms: { status: 'failed', code: 'SMS_NOT_CONFIGURED' } },
+          },
+          expiresAt: dateTime,
+          resendAvailableAt: dateTime,
+          expiresInSeconds: { ...int, example: 300 },
+          resendAvailableInSeconds: { ...int, example: 30 },
+        },
+      },
+      PasswordResetRequest: {
+        type: 'object',
+        description: 'Status only. The token, its hash and the password are never returned.',
+        properties: {
+          id: uuid,
+          userId: uuid,
+          status: { type: 'string', enum: ['PENDING', 'COMPLETED', 'EXPIRED', 'CANCELLED'] },
+          createdAt: dateTime,
+          expiresAt: dateTime,
+          completedAt: nullable(dateTime),
+          cancelledAt: nullable(dateTime),
+          requestedBy: nullable(ref('UserRef')),
+        },
+      },
+      Invitation: {
+        type: 'object',
+        description: 'Status only. The token and its hash are never returned after creation.',
+        properties: {
+          id: uuid,
+          email: str({ format: 'email' }),
+          status: { type: 'string', enum: ['PENDING', 'ACCEPTED', 'EXPIRED', 'REVOKED'] },
+          expiresAt: dateTime,
+          acceptedAt: nullable(dateTime),
+          revokedAt: nullable(dateTime),
+          createdAt: dateTime,
+          role: { type: 'object', properties: { id: uuid, name: str() } },
+          invitedBy: nullable(ref('UserRef')),
+          acceptedUser: nullable(ref('UserRef')),
         },
       },
       RecoveryCodes: {
@@ -520,7 +614,9 @@ export const openApiDocument = {
         description:
           'Rate limited to 5 attempts per minute per IP. Sets `tf_access` and `tf_refresh` httpOnly cookies. ' +
           'If the account has two-factor authentication, **no cookies are set**: the response is a `TwoFactorChallenge` ' +
-          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`.',
+          '(`twoFactorRequired: true`) to complete via `POST /api/auth/login/2fa`. ' +
+          'Otherwise, when `LOGIN_OTP_ENABLED` is on, a 6-digit code is emailed and the response is a `LoginOtpChallenge` ' +
+          '(`requiresOtp: true`) to complete via `POST /api/auth/verify-login-otp`. The code itself is never returned.',
         requestBody: body({
           type: 'object',
           required: ['email', 'password'],
@@ -531,6 +627,7 @@ export const openApiDocument = {
             oneOf: [
               { type: 'object', properties: { twoFactorRequired: { type: 'boolean', example: false }, user: ref('AuthUser'), accessToken: str() } },
               ref('TwoFactorChallenge'),
+              ref('LoginOtpChallenge'),
             ],
           }),
           '401': errorResponse('Invalid credentials', 'INVALID_CREDENTIALS', 'Invalid email or password'),
@@ -545,7 +642,9 @@ export const openApiDocument = {
         summary: 'Complete a two-factor sign-in',
         description:
           'Exchanges the `challengeToken` from `/api/auth/login` plus a 6-digit authenticator code (or a single-use recovery code) ' +
-          'for a session. Sets the auth cookies. Codes are limited to 5 attempts per 5 minutes per user.',
+          'for a session. Sets the auth cookies. Codes are limited to 5 attempts per 5 minutes per user. ' +
+          'A challenge is single-use: once it has produced a session it is refused with `TWO_FACTOR_CHALLENGE_INVALID`. ' +
+          'An expired challenge is refused with `TWO_FACTOR_CHALLENGE_EXPIRED` — sign in again.',
         requestBody: body({
           type: 'object',
           required: ['challengeToken', 'code'],
@@ -560,8 +659,49 @@ export const openApiDocument = {
               recoveryCodesRemaining: { ...int, description: 'Present only when a recovery code was used.' },
             },
           }),
-          '401': errorResponse('Wrong code or expired challenge', 'INVALID_TWO_FACTOR_CODE', 'That code is not valid. Check your authenticator app and try again.'),
+          '401': errorResponse(
+            'Wrong code (`INVALID_TWO_FACTOR_CODE`), expired challenge (`TWO_FACTOR_CHALLENGE_EXPIRED`) or used/invalid challenge (`TWO_FACTOR_CHALLENGE_INVALID`)',
+            'INVALID_TWO_FACTOR_CODE',
+            'That code is not valid. Check your authenticator app and try again.',
+          ),
           ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/verify-login-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Complete an emailed-code sign-in',
+        description:
+          'Exchanges the `verificationId` from `/api/auth/login` and the emailed 6-digit code for a session, setting the auth cookies. ' +
+          'A code is single-use, expires after 5 minutes and stops working after 5 wrong attempts. Rate limited to 10 requests per minute per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['verificationId', 'otp'],
+          properties: { verificationId: uuid, otp: str({ example: '123456' }) },
+        }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '401': errorResponse('Wrong, expired or spent code', 'LOGIN_OTP_INVALID', 'Incorrect code. 4 attempts left.'),
+          '429': errorResponse('Code locked after 5 wrong attempts', 'LOGIN_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
+          ...errors(400),
+        },
+      },
+    },
+    '/api/auth/resend-login-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Email a new sign-in code',
+        description:
+          'Replaces the code for this sign-in attempt; the previous one stops working. One resend per 60 seconds, ' +
+          'at most 5 codes per sign-in attempt, and 5 requests per 5 minutes per IP.',
+        requestBody: body({ type: 'object', required: ['verificationId'], properties: { verificationId: uuid, channel: enumOf('email', 'sms', 'both') } }),
+        responses: {
+          '200': success(ref('LoginOtpChallenge')),
+          '401': errorResponse('Attempt no longer valid', 'LOGIN_OTP_SESSION_INVALID', 'This sign-in attempt is no longer valid. Please sign in again.'),
+          '429': errorResponse('Cooldown', 'LOGIN_OTP_RESEND_COOLDOWN', 'Please wait 42 seconds before requesting a new code.'),
+          '503': errorResponse('Email could not be sent', 'EMAIL_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
+          ...errors(400),
         },
       },
     },
@@ -569,9 +709,19 @@ export const openApiDocument = {
       get: {
         tags: ['Auth'],
         summary: 'Two-factor status',
+        description: '2FA is on when the account has an authenticator app and/or at least one passkey.',
         security: secured,
         responses: {
-          '200': success({ type: 'object', properties: { enabled: bool, enabledAt: nullable(dateTime), recoveryCodesRemaining: int } }),
+          '200': success({
+            type: 'object',
+            properties: {
+              enabled: bool,
+              enabledAt: nullable(dateTime),
+              recoveryCodesRemaining: int,
+              totp: { type: 'object', properties: { enabled: bool, pending: { ...bool, description: 'Setup started, not confirmed; finished in Settings or at next sign-in.' } } },
+              passkeys: arrayOf(ref('Passkey')),
+            },
+          }),
           ...errors(401),
         },
       },
@@ -579,33 +729,61 @@ export const openApiDocument = {
     '/api/auth/me/2fa/setup': {
       post: {
         tags: ['Auth'],
-        summary: 'Start two-factor setup',
-        description: 'Generates a new secret (pending until confirmed). Show `qrCodeDataUrl` as an `<img>`; `secret` is for manual entry.',
+        summary: 'Start authenticator-app setup',
+        description:
+          'Requires the password. Parks a secret as pending until confirmed. Calling again returns the **same** secret and QR code. ' +
+          'Until confirmed, signing in shows this QR on the login page (`twoFactorSetupRequired`). Show `qrCodeDataUrl` as an `<img>`; `secret` is for manual entry.',
         security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
         responses: {
           '200': success({ type: 'object', properties: { secret: str(), otpauthUrl: str(), qrCodeDataUrl: str({ example: 'data:image/png;base64,...' }) } }),
-          '409': errorResponse('Already enabled', 'TWO_FACTOR_ALREADY_ENABLED', 'Two-factor authentication is already enabled'),
-          ...errors(401),
+          '409': errorResponse('Already set up', 'TWO_FACTOR_ALREADY_ENABLED', 'Your authenticator app is already set up'),
+          ...errors(400, 401, 429),
         },
+      },
+      delete: {
+        tags: ['Auth'],
+        summary: 'Cancel a pending authenticator setup',
+        security: secured,
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(401) },
       },
     },
     '/api/auth/me/2fa/enable': {
       post: {
         tags: ['Auth'],
-        summary: 'Confirm setup and enable two-factor',
-        description: 'Verifies a code from the app against the pending secret. Returns 10 recovery codes — they are shown only once.',
+        summary: 'Confirm authenticator setup',
+        description: 'Verifies a code against the pending secret. Returns 10 recovery codes (shown once) when this turns 2FA on; `null` when a passkey already had.',
         security: secured,
         requestBody: body({ type: 'object', required: ['code'], properties: { code: str({ example: '123456' }) } }),
         responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 409, 429) },
+      },
+    },
+    '/api/auth/me/2fa/totp': {
+      delete: {
+        tags: ['Auth'],
+        summary: 'Remove the authenticator app',
+        description: 'Requires the password. With no passkey left, 2FA turns off.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object', properties: { twoFactorEnabled: bool } }), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/step-up/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passkey options for a sensitive change',
+        description: 'WebAuthn request options; sign them with a passkey and send the result as `passkey` to disable or regenerate recovery codes.',
+        security: secured,
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401) },
       },
     },
     '/api/auth/me/2fa/disable': {
       post: {
         tags: ['Auth'],
         summary: 'Disable two-factor',
-        description: 'Requires the account password and a current authenticator or recovery code.',
+        description: 'Requires the password plus one of: `code` (authenticator or recovery) or `passkey`. Removes every method and recovery code.',
         security: secured,
-        requestBody: body({ type: 'object', required: ['password', 'code'], properties: { password: str(), code: str() } }),
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str(), code: str({ description: 'Authenticator or recovery code' }), passkey: { type: 'object', description: 'WebAuthn assertion signed over `/api/auth/me/2fa/step-up/options`' } } }),
         responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 429) },
       },
     },
@@ -613,32 +791,138 @@ export const openApiDocument = {
       post: {
         tags: ['Auth'],
         summary: 'Regenerate recovery codes',
-        description: 'Requires a current code. Replaces all recovery codes; the old ones stop working.',
+        description: 'Requires a current `code` or a `passkey`. Replaces all recovery codes; the old ones stop working.',
         security: secured,
-        requestBody: body({ type: 'object', required: ['code'], properties: { code: str() } }),
+        requestBody: body({ type: 'object', properties: { code: str(), passkey: { type: 'object' } } }),
         responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/passkeys/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Start adding a passkey',
+        description: 'Requires the password. Returns WebAuthn creation options for `navigator.credentials.create()`.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/passkeys': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Finish adding a passkey',
+        description: 'Verifies the browser attestation. Returns recovery codes (shown once) when this turns 2FA on; `null` otherwise.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['response'], properties: { response: { type: 'object' }, name: str({ example: 'MacBook Touch ID' }) } }),
+        responses: {
+          '201': success({ type: 'object', properties: { passkey: ref('Passkey'), recoveryCodes: nullable(arrayOf(str())) } }),
+          '400': errorResponse('Verification failed', 'PASSKEY_VERIFICATION_FAILED', 'That passkey could not be verified.'),
+          ...errors(401),
+        },
+      },
+    },
+    '/api/auth/me/2fa/passkeys/{id}': {
+      delete: {
+        tags: ['Auth'],
+        summary: 'Remove a passkey',
+        description: 'Requires the password. Removing the last sign-in method turns 2FA off.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object', properties: { twoFactorEnabled: bool } }), ...errors(400, 401, 404, 429) },
+      },
+    },
+    '/api/auth/login/2fa/setup': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Finish a pending authenticator setup at sign-in',
+        description: 'For a `twoFactorSetupRequired` login: a code from the newly scanned app turns 2FA on, sets the auth cookies and returns recovery codes (shown once).',
+        requestBody: body({ type: 'object', required: ['challengeToken', 'code'], properties: { challengeToken: str(), code: str({ example: '123456' }) } }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str(), recoveryCodes: arrayOf(str()) } }),
+          ...errors(400, 401, 429),
+        },
+      },
+    },
+    '/api/auth/login/2fa/passkey/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passkey sign-in options',
+        description: 'WebAuthn request options for `navigator.credentials.get()`, bound to this sign-in attempt.',
+        requestBody: body({ type: 'object', required: ['challengeToken'], properties: { challengeToken: str() } }),
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401) },
+      },
+    },
+    '/api/auth/login/2fa/passkey': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Complete a two-factor sign-in with a passkey',
+        requestBody: body({ type: 'object', required: ['challengeToken', 'response'], properties: { challengeToken: str(), response: { type: 'object' } } }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '400': errorResponse('Passkey rejected', 'PASSKEY_VERIFICATION_FAILED', 'That passkey could not be verified.'),
+          ...errors(401, 429),
+        },
       },
     },
     '/api/auth/register': {
       post: {
         tags: ['Auth'],
-        summary: 'Sign up',
+        summary: 'Sign up (step 1 of 2)',
         description:
-          'Creates an active account with the **Employee** role and signs it in. Rate limited like login. Sets `tf_access` and `tf_refresh` httpOnly cookies.',
+          'Creates a **PENDING** account with the **Employee** role and sends one 6-digit code to the email address and, by SMS, ' +
+          'to the mobile number. No session and no cookies: verify the code with `/api/auth/register/verify-otp`, then sign in. ' +
+          'Signing up again with the email or number of an unverified account replaces that account. Rate limited like login.',
         requestBody: body({
           type: 'object',
-          required: ['firstName', 'lastName', 'email', 'password'],
+          required: ['firstName', 'lastName', 'email', 'phone', 'password'],
           properties: {
             firstName: str({ example: 'Sam' }),
             lastName: str({ example: 'Rivera' }),
             email: str({ example: 'sam@company.com' }),
+            phone: str({ example: '+919876543210', description: 'With country code. Spaces and dashes are ignored.' }),
             password: str({ example: 'Signup1234', description: 'At least 8 characters, with a letter and a number' }),
           },
         }),
         responses: {
-          '201': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
-          '409': errorResponse('Email taken', 'USER_EMAIL_EXISTS', 'An account with this email already exists'),
+          '201': success(ref('SignupOtpChallenge')),
+          '409': errorResponse('Email or mobile number taken', 'USER_EMAIL_EXISTS', 'An account with this email already exists'),
+          '503': errorResponse('Code could not be sent', 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
           ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/register/verify-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Verify sign-up code (step 2 of 2)',
+        description: 'Activates the account. The same code was sent by email and SMS; either copy works. 5 wrong codes per code, 10 requests per minute per IP.',
+        requestBody: body({ type: 'object', required: ['verificationId', 'otp'], properties: { verificationId: uuid, otp: str({ example: '482913' }) } }),
+        responses: {
+          '200': success({ type: 'object', properties: { verified: bool, user: { type: 'object', properties: { id: uuid, email: str() } } } }),
+          '400': errorResponse('Wrong code', 'SIGNUP_OTP_INVALID', 'Incorrect code. 4 attempts left.'),
+          '401': errorResponse('Code expired or verification no longer valid', 'SIGNUP_OTP_EXPIRED', 'This code has expired. Request a new one.'),
+          '429': errorResponse('Too many wrong codes', 'SIGNUP_OTP_TOO_MANY_ATTEMPTS', 'Too many incorrect codes. Request a new code to try again.'),
+        },
+      },
+    },
+    '/api/auth/register/resend-otp': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Resend sign-up code',
+        description:
+          'Replaces the code; the previous one stops working. `channel` is `email`, `sms` or `both` (default). ' +
+          'One resend per 30 seconds, at most 5 codes per sign-up, and 5 requests per 5 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['verificationId'],
+          properties: { verificationId: uuid, channel: enumOf('email', 'sms', 'both') },
+        }),
+        responses: {
+          '200': success(ref('SignupOtpChallenge')),
+          '401': errorResponse('Verification no longer valid', 'SIGNUP_OTP_SESSION_INVALID', 'This verification is no longer valid. Please sign up again.'),
+          '429': errorResponse('Cooldown', 'SIGNUP_OTP_RESEND_COOLDOWN', 'Please wait 12 seconds before requesting a new code.'),
+          '503': errorResponse('Code could not be sent', 'OTP_DELIVERY_FAILED', 'We could not send your verification code. Please try again in a moment.'),
+          ...errors(400),
         },
       },
     },
@@ -663,7 +947,7 @@ export const openApiDocument = {
       entity: 'User',
       perms: 'users',
       sortable: ['createdAt', 'firstName', 'lastName', 'email', 'status', 'lastLoginAt'],
-      filters: [q('status', userStatus), q('roleId', uuid)],
+      filters: [q('status', userStatusAny), q('roleId', uuid)],
       create: 'CreateUser',
       update: 'UpdateUser',
       listNote: '`search` matches name, email and phone.',
@@ -688,6 +972,157 @@ export const openApiDocument = {
         security: secured,
         parameters: [idParam],
         responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 403, 404) },
+      },
+    },
+    '/api/admin/users/{userId}/password-reset': {
+      post: {
+        tags: ['Password Resets'],
+        summary: 'Email a password reset link to a member',
+        description:
+          '**Super Admin only** (by role, not permission). Cancels any link still pending for the member, issues a new single-use link ' +
+          'valid for `RESET_PASSWORD_TOKEN_EXPIRY_MINUTES` (default 30) and emails it. Rate limited to 10 per 10 minutes per admin.',
+        security: secured,
+        parameters: [{ name: 'userId', in: 'path', required: true, schema: uuid }],
+        responses: {
+          '200': success(ref('PasswordResetRequest')),
+          '400': errorResponse('Inactive user', 'USER_INACTIVE', 'This user is inactive. Activate the account before sending a password reset link.'),
+          '503': errorResponse('Email could not be sent', 'EMAIL_DELIVERY_FAILED', 'Unable to send password reset email.'),
+          ...errors(401, 403, 404, 429),
+        },
+      },
+      get: {
+        tags: ['Password Resets'],
+        summary: "A member's latest password reset request",
+        description: '**Super Admin only.** `data` is null when no reset was ever requested. A lapsed PENDING link is reported as EXPIRED.',
+        security: secured,
+        parameters: [{ name: 'userId', in: 'path', required: true, schema: uuid }],
+        responses: { '200': success(nullable(ref('PasswordResetRequest'))), ...errors(401, 403, 404) },
+      },
+    },
+    '/api/admin/password-reset-requests': {
+      get: {
+        tags: ['Password Resets'],
+        summary: 'Latest password reset request per member',
+        description: '**Super Admin only.** Members without a request are omitted.',
+        security: secured,
+        parameters: [q('userIds', str(), 'Comma-separated user ids (max 100).')],
+        responses: { '200': success(arrayOf(ref('PasswordResetRequest'))), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/admin/invitations': {
+      post: {
+        tags: ['Invitations'],
+        summary: 'Generate an invitation link',
+        description:
+          '**Super Admin only** (by role). Takes only the email and role; the account is created when the invitee sets a password. ' +
+          'Returns `inviteUrl` (APP_URL/accept-invitation?token=…) for the "Copy Link" button — it is shown only once. ' +
+          'Inviting the same email again revokes the previous link. Valid for `INVITATION_EXPIRY_HOURS` (default 72).',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['email', 'roleId'], properties: { email: str({ format: 'email' }), roleId: uuid } }),
+        responses: {
+          '201': success({ type: 'object', properties: { invitation: ref('Invitation'), inviteUrl: str({ example: 'http://localhost:3000/accept-invitation?token=…' }) } }),
+          '409': errorResponse('Email already registered', 'USER_EMAIL_EXISTS', 'A user with this email already exists'),
+          ...errors(400, 401, 403, 429),
+        },
+      },
+      get: {
+        tags: ['Invitations'],
+        summary: 'List invitations',
+        description: '**Super Admin only.** A lapsed PENDING link is reported (and filtered) as EXPIRED.',
+        security: secured,
+        parameters: [...listParams(['createdAt', 'email', 'expiresAt']), q('status', enumOf('PENDING', 'ACCEPTED', 'EXPIRED', 'REVOKED'))],
+        responses: { '200': paginatedOf(ref('Invitation')), ...errors(400, 401, 403) },
+      },
+    },
+    '/api/admin/invitations/{id}': {
+      delete: {
+        tags: ['Invitations'],
+        summary: 'Revoke a pending invitation',
+        description: '**Super Admin only.**',
+        security: secured,
+        parameters: [idParam],
+        responses: {
+          '200': success(ref('Invitation')),
+          '400': errorResponse('Not pending', 'INVITATION_NOT_PENDING', 'Only a pending invitation can be revoked'),
+          ...errors(401, 403, 404),
+        },
+      },
+    },
+    '/api/auth/invitations/verify': {
+      get: {
+        tags: ['Invitations'],
+        summary: 'Check an invitation link',
+        description: 'Public. Called by the Set Password page on load. Rate limited to 30 per minute per IP.',
+        parameters: [{ name: 'token', in: 'query', required: true, schema: str() }],
+        responses: {
+          '200': success({
+            type: 'object',
+            properties: { valid: bool, email: str({ format: 'email' }), role: { type: 'object', properties: { id: uuid, name: str() } }, expiresAt: dateTime },
+          }),
+          '410': errorResponse('Link expired, used, revoked or unknown', 'INVITATION_LINK_INVALID', 'Invitation Link Expired or Already Used'),
+          ...errors(429),
+        },
+      },
+    },
+    '/api/auth/invitations/accept': {
+      post: {
+        tags: ['Invitations'],
+        summary: 'Set a password and create the account',
+        description:
+          'Public. The password needs 8+ characters with upper- and lowercase letters, a number and a special character. ' +
+          'Creates the user with the invited email and role, and spends the link. Does not sign in — redirect to Login. ' +
+          'Name is optional; if omitted it is derived from the email. Rate limited to 10 per 15 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['token', 'password', 'confirmPassword'],
+          properties: {
+            token: str(),
+            password: str({ example: 'NewPassword123!' }),
+            confirmPassword: str({ example: 'NewPassword123!' }),
+            firstName: str(),
+            lastName: str(),
+          },
+        }),
+        responses: {
+          '200': success({ type: 'object', properties: { email: str({ format: 'email' }) } }),
+          '409': errorResponse('Email already registered', 'USER_EMAIL_EXISTS', 'A user with this email already exists'),
+          '410': errorResponse('Link expired, used, revoked or unknown', 'INVITATION_LINK_INVALID', 'Invitation Link Expired or Already Used'),
+          ...errors(400, 429),
+        },
+      },
+    },
+    '/api/auth/password-reset/verify': {
+      get: {
+        tags: ['Password Resets'],
+        summary: 'Check a password reset link',
+        description: 'Public. Rate limited to 30 per minute per IP.',
+        parameters: [{ name: 'token', in: 'query', required: true, schema: str() }],
+        responses: {
+          '200': success({ type: 'object', properties: { valid: { type: 'boolean', example: true }, expiresAt: dateTime } }),
+          '400': errorResponse('Unknown, used or cancelled link', 'PASSWORD_RESET_INVALID', 'This password reset link is invalid or expired.'),
+          '410': errorResponse('Link expired', 'PASSWORD_RESET_EXPIRED', 'This reset link has expired. Ask your administrator for a new one.'),
+          ...errors(429),
+        },
+      },
+    },
+    '/api/auth/password-reset': {
+      post: {
+        tags: ['Password Resets'],
+        summary: 'Set a new password with a reset link',
+        description:
+          'Public. The password needs 8+ characters with upper- and lowercase letters, a number and a special character. ' +
+          'Spends the link, and signs the member out everywhere. Rate limited to 10 per 15 minutes per IP.',
+        requestBody: body({
+          type: 'object',
+          required: ['token', 'newPassword', 'confirmPassword'],
+          properties: { token: str(), newPassword: str({ example: 'NewPassword123!' }), confirmPassword: str({ example: 'NewPassword123!' }) },
+        }),
+        responses: {
+          '200': success(nullable({ type: 'object' })),
+          '400': errorResponse('Invalid link or password', 'PASSWORD_RESET_INVALID', 'This password reset link is invalid or expired.'),
+          '410': errorResponse('Link expired', 'PASSWORD_RESET_EXPIRED', 'This reset link has expired. Ask your administrator for a new one.'),
+          ...errors(429),
+        },
       },
     },
     '/api/users/options': {

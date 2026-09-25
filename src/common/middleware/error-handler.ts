@@ -2,9 +2,18 @@ import type { ErrorRequestHandler, RequestHandler } from 'express';
 import { Prisma } from '@prisma/client';
 import { MulterError } from 'multer';
 import { ZodError } from 'zod';
-import { isProd } from '../../config/env';
+import { env, isProd } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { AppError, ConflictError, NotFoundError, ValidationError, type ErrorDetail } from '../errors';
+
+/** The only thing a client learns about an unexpected failure. The cause is in the logs, keyed by requestId. */
+export const INTERNAL_ERROR_MESSAGE = 'Something went wrong on our end. Please try again shortly.';
+
+/**
+ * Raw error text (Prisma messages, file paths, SQL) is attached to 5xx
+ * responses only when a developer opts in, and never in production.
+ */
+const exposeDebug = !isProd && env.EXPOSE_ERROR_DETAILS;
 
 export const notFoundHandler: RequestHandler = (req, _res, next) => {
   next(new AppError(404, 'ROUTE_NOT_FOUND', `Route ${req.method} ${req.path} not found`));
@@ -18,6 +27,7 @@ function zodToDetails(err: ZodError): ErrorDetail[] {
 function mapUniqueViolation(err: Prisma.PrismaClientKnownRequestError): AppError {
   const target = JSON.stringify(err.meta?.target ?? '');
   const model = String(err.meta?.modelName ?? '');
+  if (target.includes('phone')) return new ConflictError('An account with this mobile number already exists', 'USER_PHONE_EXISTS');
   if (target.includes('email') || (model === 'User' && target.includes('users_email'))) {
     return new ConflictError('Email already exists', 'USER_EMAIL_EXISTS');
   }
@@ -51,7 +61,7 @@ export function normalizeError(err: unknown): AppError {
     if (type === 'entity.parse.failed') return new AppError(400, 'BAD_REQUEST', 'Malformed JSON body');
     if (type === 'entity.too.large') return new AppError(413, 'PAYLOAD_TOO_LARGE', 'Request body is too large');
   }
-  return new AppError(500, 'INTERNAL_ERROR', 'Something went wrong');
+  return new AppError(500, 'INTERNAL_ERROR', INTERNAL_ERROR_MESSAGE);
 }
 
 export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
@@ -69,10 +79,11 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
 
   res.status(appError.statusCode).json({
     success: false,
+    statusCode: appError.statusCode,
     message: appError.message,
     code: appError.code,
     ...(appError.details ? { details: appError.details } : {}),
     ...(requestId ? { requestId } : {}),
-    ...(!isProd && appError.statusCode >= 500 && err instanceof Error ? { debug: err.message } : {}),
+    ...(exposeDebug && appError.statusCode >= 500 && err instanceof Error ? { debug: err.message } : {}),
   });
 };

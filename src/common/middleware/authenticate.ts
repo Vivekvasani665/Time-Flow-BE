@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express';
 import { SESSION_EXPIRES_HEADER, tokenService } from '../../modules/auth/token.service';
 import { rbacService } from '../../modules/permissions/rbac.service';
-import type { PermissionKey } from '../../modules/permissions/permission-catalog';
+import { SUPER_ADMIN_ROLE, type PermissionKey } from '../../modules/permissions/permission-catalog';
 import { ForbiddenError, UnauthorizedError } from '../errors';
 
 /**
@@ -39,3 +39,14 @@ export function requirePermission(...permissions: PermissionKey[]): RequestHandl
     return next();
   };
 }
+
+/**
+ * Restricts a route to the Super Admin role itself, not merely to a permission
+ * set — for account-takeover-grade actions such as issuing password reset or invitation links.
+ * The role's name is immutable (it is the system role). Must run after `authenticate`.
+ */
+export const requireSuperAdmin: RequestHandler = (req, _res, next) => {
+  if (!req.auth) return next(new UnauthorizedError());
+  if (req.auth.roleName !== SUPER_ADMIN_ROLE) return next(new ForbiddenError('Only a Super Admin can perform this action'));
+  return next();
+};

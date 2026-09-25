@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { CookieOptions, Request, Response } from 'express';
 import { env } from '../../config/env';
 import { randomToken, sha256 } from '../../common/utils/crypto';
-import type { AccessTokenPayload, TwoFactorChallengePayload, VerifiedAccessToken } from './auth.types';
+import type { AccessTokenPayload, TwoFactorChallengePayload, TwoFactorChallengePurpose, VerifiedAccessToken, VerifiedTwoFactorChallenge } from './auth.types';
 
 export const ACCESS_COOKIE = 'tf_access';
 export const REFRESH_COOKIE = 'tf_refresh';
@@ -65,22 +66,36 @@ export const tokenService = {
       expiresIn: ttlSeconds,
       issuer: JWT_ISSUER,
       audience: JWT_CHALLENGE_AUDIENCE,
+      jwtid: randomUUID(),
     });
     return { token, expiresAt: new Date(Date.now() + ttlSeconds * 1000) };
   },
 
-  /** Returns the payload, or null for any invalid/expired challenge. */
-  verifyTwoFactorChallenge(token: string): TwoFactorChallengePayload | null {
+  /**
+   * The payload, or why it was refused. `expired` is told apart so the client
+   * can say "sign in again" rather than "something is wrong".
+   */
+  verifyTwoFactorChallenge(token: string, purpose: TwoFactorChallengePurpose): VerifiedTwoFactorChallenge | 'expired' | 'invalid' {
     try {
       const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
         algorithms: ['HS256'],
         issuer: JWT_ISSUER,
         audience: JWT_CHALLENGE_AUDIENCE,
       });
-      if (typeof decoded === 'string' || typeof decoded.sub !== 'string' || typeof decoded.tv !== 'number') return null;
-      return { sub: decoded.sub, tv: decoded.tv };
-    } catch {
-      return null;
+      if (
+        typeof decoded === 'string' ||
+        typeof decoded.sub !== 'string' ||
+        typeof decoded.tv !== 'number' ||
+        typeof decoded.jti !== 'string' ||
+        typeof decoded.exp !== 'number' ||
+        // A setup challenge must never pass for a verify one, or the reverse.
+        decoded.pur !== purpose
+      ) {
+        return 'invalid';
+      }
+      return { sub: decoded.sub, tv: decoded.tv, pur: purpose, jti: decoded.jti, exp: decoded.exp };
+    } catch (err) {
+      return err instanceof jwt.TokenExpiredError ? 'expired' : 'invalid';
     }
   },
 

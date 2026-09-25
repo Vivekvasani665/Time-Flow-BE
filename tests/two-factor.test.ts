@@ -1,6 +1,8 @@
+import jwt from 'jsonwebtoken';
 import { describe, expect, it } from 'vitest';
+import { env } from '../src/config/env';
 import { base32Encode, generateTotp, totpStep, verifyTotp } from '../src/common/utils/totp';
-import { api, loginAs, nextIp, unique } from './helpers';
+import { api, loginAs, nextIp, signUpAndLogin, unique } from './helpers';
 
 const PASSWORD = 'TwoFactor123';
 
@@ -16,11 +18,7 @@ const code = (secret: string, offset = 0) => generateTotp(secret, totpStep() + o
 
 async function newUser() {
   const email = `${unique('tfa')}@example.com`;
-  const res = await api()
-    .post('/api/auth/register')
-    .set('X-Forwarded-For', nextIp())
-    .send({ firstName: 'Tess', lastName: 'Factor', email, password: PASSWORD });
-  expect(res.status).toBe(201);
+  const res = await signUpAndLogin({ firstName: 'Tess', lastName: 'Factor', email, password: PASSWORD });
   const token: string = res.body.data.accessToken;
   return { email, userId: res.body.data.user.id as string, auth: (r: ReturnType<ReturnType<typeof api>['get']>) => r.set('Authorization', `Bearer ${token}`) };
 }
@@ -28,7 +26,7 @@ async function newUser() {
 /** A registered user with 2FA already on. Consumes step −1 and one code attempt. */
 async function enrolledUser() {
   const user = await newUser();
-  const setup = await user.auth(api().post('/api/auth/me/2fa/setup'));
+  const setup = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: PASSWORD });
   expect(setup.status).toBe(200);
   const secret: string = setup.body.data.secret;
   const enable = await user.auth(api().post('/api/auth/me/2fa/enable')).send({ code: code(secret, -1) });
@@ -69,9 +67,19 @@ describe('2FA enrolment', () => {
     const before = await user.auth(api().get('/api/auth/me/2fa'));
     expect(before.body.data).toMatchObject({ enabled: false, recoveryCodesRemaining: 0 });
 
-    const setup = await user.auth(api().post('/api/auth/me/2fa/setup'));
+    const noPassword = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: 'wrong-password-1' });
+    expect(noPassword.status).toBe(400);
+    expect(noPassword.body.code).toBe('INVALID_PASSWORD');
+
+    const setup = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: PASSWORD });
     expect(setup.status).toBe(200);
     const { secret, otpauthUrl, qrCodeDataUrl } = setup.body.data;
+
+    // Opening setup again shows the same QR — the app may already have scanned it.
+    const reopened = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: PASSWORD });
+    expect(reopened.body.data.secret).toBe(secret);
+    const pending = await user.auth(api().get('/api/auth/me/2fa'));
+    expect(pending.body.data.totp).toEqual({ enabled: false, pending: true });
     expect(secret).toMatch(/^[A-Z2-7]{32}$/);
     expect(otpauthUrl).toContain(`otpauth://totp/TimeFlow%3A${encodeURIComponent(user.email)}?secret=${secret}`);
     expect(qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
@@ -90,7 +98,7 @@ describe('2FA enrolment', () => {
     const me = await user.auth(api().get('/api/auth/me'));
     expect(me.body.data.twoFactorEnabled).toBe(true);
 
-    const again = await user.auth(api().post('/api/auth/me/2fa/setup'));
+    const again = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: PASSWORD });
     expect(again.status).toBe(409);
     expect(again.body.code).toBe('TWO_FACTOR_ALREADY_ENABLED');
   });
@@ -109,7 +117,7 @@ describe('2FA sign-in', () => {
 
     const first = await login(user.email);
     expect(first.status).toBe(200);
-    expect(first.body.data).toMatchObject({ twoFactorRequired: true, challengeToken: expect.any(String) });
+    expect(first.body.data).toMatchObject({ twoFactorRequired: true, challengeToken: expect.any(String), methods: ['totp', 'recovery'] });
     expect(first.body.data).not.toHaveProperty('accessToken');
     expect(cookieNames(first)).toEqual([]);
 
@@ -129,6 +137,35 @@ describe('2FA sign-in', () => {
     expect(replay.status).toBe(401);
   });
 
+  it('spends the challenge on success, but not on a wrong code', async () => {
+    const user = await enrolledUser();
+    const { challengeToken } = (await login(user.email)).body.data;
+
+    expect((await loginTwoFactor(challengeToken, '000000')).status).toBe(401);
+    expect((await loginTwoFactor(challengeToken, code(user.secret))).status).toBe(200);
+
+    // A fresh, valid code still cannot turn the same challenge into a second session.
+    const reused = await loginTwoFactor(challengeToken, code(user.secret, 1));
+    expect(reused.status).toBe(401);
+    expect(reused.body.code).toBe('TWO_FACTOR_CHALLENGE_INVALID');
+  });
+
+  it('tells an expired challenge apart from an invalid one', async () => {
+    const user = await enrolledUser();
+    const expired = jwt.sign({ sub: user.userId, tv: 0, pur: 'verify', exp: Math.floor(Date.now() / 1000) - 5 }, env.JWT_ACCESS_SECRET, {
+      algorithm: 'HS256',
+      issuer: 'timeflow-api',
+      audience: 'timeflow-2fa',
+      jwtid: 'expired-challenge',
+    });
+    const res = await loginTwoFactor(expired, code(user.secret));
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('TWO_FACTOR_CHALLENGE_EXPIRED');
+
+    const garbage = await loginTwoFactor('not-a-token', '123456');
+    expect(garbage.body.code).toBe('TWO_FACTOR_CHALLENGE_INVALID');
+  });
+
   it('accepts each recovery code once', async () => {
     const user = await enrolledUser();
     const { challengeToken } = (await login(user.email)).body.data;
@@ -138,8 +175,11 @@ describe('2FA sign-in', () => {
     expect(ok.status).toBe(200);
     expect(ok.body.data.recoveryCodesRemaining).toBe(9);
 
-    const reused = await loginTwoFactor(challengeToken, recovery);
+    // A new sign-in, so it is the recovery code — not the spent challenge — being refused.
+    const again = (await login(user.email)).body.data.challengeToken;
+    const reused = await loginTwoFactor(again, recovery);
     expect(reused.status).toBe(401);
+    expect(reused.body.code).toBe('INVALID_TWO_FACTOR_CODE');
   });
 
   it('keeps challenge tokens and access tokens apart', async () => {
@@ -211,5 +251,58 @@ describe('2FA management', () => {
     expect(res.body.data.twoFactorRequired).toBe(false);
     const again = await admin.auth(api().post(`/api/users/${user.userId}/2fa/reset`));
     expect(again.body.code).toBe('TWO_FACTOR_NOT_ENABLED');
+  });
+});
+
+describe('finishing a pending setup at sign-in', () => {
+  /** Setup started in Settings, never confirmed. */
+  async function pendingUser() {
+    const user = await newUser();
+    const setup = await user.auth(api().post('/api/auth/me/2fa/setup')).send({ password: PASSWORD });
+    return { ...user, secret: setup.body.data.secret as string, qr: setup.body.data.qrCodeDataUrl as string };
+  }
+
+  const finishSetup = (challengeToken: string, c: string) =>
+    api().post('/api/auth/login/2fa/setup').set('X-Forwarded-For', nextIp()).send({ challengeToken, code: c });
+
+  it('shows the same QR on the login page, and a code turns 2FA on and signs in', async () => {
+    const user = await pendingUser();
+
+    const first = await login(user.email);
+    expect(first.status).toBe(200);
+    expect(first.body.data).toMatchObject({ twoFactorSetupRequired: true, setup: { secret: user.secret, qrCodeDataUrl: user.qr } });
+    expect(cookieNames(first)).toEqual([]);
+    // Signing in again does not mint a new secret.
+    expect((await login(user.email)).body.data.setup.secret).toBe(user.secret);
+
+    const wrong = await finishSetup(first.body.data.challengeToken, '000000');
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.code).toBe('INVALID_TWO_FACTOR_CODE');
+
+    const done = await finishSetup(first.body.data.challengeToken, code(user.secret));
+    expect(done.status).toBe(200);
+    expect(done.body.data.recoveryCodes).toHaveLength(10);
+    expect(done.body.data.user.twoFactorEnabled).toBe(true);
+    expect(cookieNames(done)).toEqual(expect.arrayContaining(['tf_access', 'tf_refresh']));
+
+    // From now on: the normal 2FA step, no QR.
+    const next = await login(user.email);
+    expect(next.body.data).toMatchObject({ twoFactorRequired: true });
+    expect(next.body.data).not.toHaveProperty('setup');
+  });
+
+  it('keeps setup and verify challenges apart', async () => {
+    const user = await pendingUser();
+    const { challengeToken } = (await login(user.email)).body.data;
+    const asVerify = await loginTwoFactor(challengeToken, code(user.secret));
+    expect(asVerify.status).toBe(401);
+    expect(asVerify.body.code).toBe('TWO_FACTOR_CHALLENGE_INVALID');
+  });
+
+  it('cancelling the setup brings back the plain sign-in', async () => {
+    const user = await pendingUser();
+    expect((await user.auth(api().delete('/api/auth/me/2fa/setup'))).status).toBe(200);
+    const res = await login(user.email);
+    expect(res.body.data).toMatchObject({ twoFactorRequired: false, accessToken: expect.any(String) });
   });
 });
