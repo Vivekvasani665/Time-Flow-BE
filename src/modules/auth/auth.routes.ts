@@ -63,6 +63,9 @@ export const authRouter = Router();
 
 authRouter.post('/login', loginLimiter, authController.login);
 authRouter.post('/login/2fa', twoFactorLoginLimiter, authController.loginTwoFactor);
+authRouter.post('/login/2fa/setup', twoFactorLoginLimiter, authController.loginTwoFactorSetup);
+authRouter.post('/login/2fa/passkey/options', twoFactorLoginLimiter, authController.passkeyLoginOptions);
+authRouter.post('/login/2fa/passkey', twoFactorLoginLimiter, authController.loginPasskey);
 authRouter.post('/verify-login-otp', loginOtpVerifyLimiter, authController.verifyLoginOtp);
 authRouter.post('/login/otp/verify', loginOtpVerifyLimiter, authController.verifyLoginOtp);
 authRouter.post('/resend-login-otp', loginOtpResendLimiter, authController.resendLoginOtp);
@@ -82,6 +85,13 @@ authRouter.delete('/me/sessions/:id', authenticate, authController.revokeSession
 // Two-factor authentication (TOTP) for your own account.
 authRouter.get('/me/2fa', authenticate, authController.twoFactorStatus);
 authRouter.post('/me/2fa/setup', authenticate, authController.twoFactorSetup);
+authRouter.delete('/me/2fa/setup', authenticate, authController.twoFactorCancelSetup);
 authRouter.post('/me/2fa/enable', authenticate, authController.twoFactorEnable);
+authRouter.delete('/me/2fa/totp', authenticate, authController.twoFactorRemoveTotp);
 authRouter.post('/me/2fa/disable', authenticate, authController.twoFactorDisable);
 authRouter.post('/me/2fa/recovery-codes', authenticate, authController.twoFactorRegenerateCodes);
+// Passkey proof before a sensitive change (disable, new recovery codes).
+authRouter.post('/me/2fa/step-up/options', authenticate, authController.twoFactorStepUpOptions);
+authRouter.post('/me/2fa/passkeys/options', authenticate, authController.passkeyRegistrationOptions);
+authRouter.post('/me/2fa/passkeys', authenticate, authController.registerPasskey);
+authRouter.delete('/me/2fa/passkeys/:id', authenticate, authController.removePasskey);

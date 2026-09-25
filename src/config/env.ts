@@ -34,6 +34,17 @@ const EnvSchema = z.object({
   /** How long a password-verified sign-in waits for its 2FA code. */
   TWO_FACTOR_CHALLENGE_TTL_MINUTES: z.coerce.number().int().positive().default(5),
   /**
+   * Passkeys are bound to a domain (the "relying party"). Defaults to APP_URL's
+   * host name, e.g. `timeflow.example.com`; changing it later orphans every
+   * registered passkey.
+   */
+  WEBAUTHN_RP_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Origins the browser may prove a passkey from. Defaults to APP_URL's origin. Comma-separated. */
+  WEBAUTHN_ORIGINS: z
+    .string()
+    .optional()
+    .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : undefined)),
+  /**
    * Emails a 6-digit code after a correct password, and issues the session
    * only once it is entered. Off by default: it needs working outgoing mail,
    * or nobody can sign in. Accounts with an authenticator app use that instead.

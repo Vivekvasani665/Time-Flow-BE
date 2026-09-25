@@ -75,8 +75,10 @@ model User {
   /// settings need no migration; the server validates the shape on write.
   preferences  Json       @default("{}")
 
-  /// TOTP two-factor authentication. Secrets are AES-256-GCM encrypted
-  /// (see encryptSecret); the pending secret holds an unconfirmed setup.
+  /// Two-factor authentication. On when the user has at least one method: an
+  /// authenticator app (twoFactorSecret set) and/or passkeys (webauthnCredentials).
+  /// TOTP secrets are AES-256-GCM encrypted (see encryptSecret); the pending
+  /// secret holds an unconfirmed setup, finished in Settings or at next sign-in.
   twoFactorEnabled       Boolean   @default(false) @map("two_factor_enabled")
   twoFactorSecret        String?   @map("two_factor_secret")
   twoFactorPendingSecret String?   @map("two_factor_pending_secret")
@@ -98,6 +100,7 @@ model User {
   notifications   Notification[]
   refreshTokens   RefreshToken[]
   recoveryCodes   TwoFactorRecoveryCode[]
+  passkeys        WebAuthnCredential[]
   loginOtps       LoginOtp[]
   signupOtps      SignupOtp[]
   emailsReceived  EmailLog[]              @relation("EmailsReceived")
@@ -258,6 +261,30 @@ model Notification {
 
   @@index([userId, readAt, createdAt(sort: Desc)])
   @@map("notifications")
+}
+
+/// A passkey (WebAuthn credential) used as a second factor: Face ID, Touch ID,
+/// Windows Hello, a device PIN or a security key.
+model WebAuthnCredential {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  /// Base64url credential id, as the browser reports it.
+  credentialId String    @unique @map("credential_id") @db.VarChar(1024)
+  /// COSE-encoded public key. Nothing secret is stored.
+  publicKey    Bytes     @map("public_key")
+  /// Signature counter; a counter that goes backwards suggests a cloned key.
+  counter      BigInt    @default(0)
+  transports   String[]  @db.VarChar(32)
+  name         String    @db.VarChar(80)
+  /// Synced across devices (e.g. iCloud Keychain, Google Password Manager).
+  backedUp     Boolean   @default(false) @map("backed_up")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUsedAt   DateTime? @map("last_used_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("webauthn_credentials")
 }
 
 /// Single-use backup codes for when the authenticator app is unavailable.

@@ -215,9 +215,24 @@ export const openApiDocument = {
         type: 'object',
         properties: {
           twoFactorRequired: { type: 'boolean', example: true },
-          challengeToken: str({ description: 'Post back to `/api/auth/login/2fa` with a code.' }),
+          challengeToken: str({ description: 'Post back to `/api/auth/login/2fa` with a code, or use it for a passkey sign-in.' }),
           challengeExpiresAt: dateTime,
+          methods: arrayOf(enumOf('totp', 'passkey', 'recovery')),
         },
+      },
+      TwoFactorSetupChallenge: {
+        type: 'object',
+        description: 'Password accepted; 2FA is off but an authenticator setup is pending. Show the QR, then post a code to `/api/auth/login/2fa/setup`.',
+        properties: {
+          twoFactorSetupRequired: { type: 'boolean', example: true },
+          challengeToken: str(),
+          challengeExpiresAt: dateTime,
+          setup: { type: 'object', properties: { secret: str(), otpauthUrl: str(), qrCodeDataUrl: str({ example: 'data:image/png;base64,...' }) } },
+        },
+      },
+      Passkey: {
+        type: 'object',
+        properties: { id: str({ format: 'uuid' }), name: str({ example: 'Chrome on macOS' }), backedUp: bool, createdAt: dateTime, lastUsedAt: nullable(dateTime) },
       },
       LoginOtpChallenge: {
         type: 'object',
@@ -694,9 +709,19 @@ export const openApiDocument = {
       get: {
         tags: ['Auth'],
         summary: 'Two-factor status',
+        description: '2FA is on when the account has an authenticator app and/or at least one passkey.',
         security: secured,
         responses: {
-          '200': success({ type: 'object', properties: { enabled: bool, enabledAt: nullable(dateTime), recoveryCodesRemaining: int } }),
+          '200': success({
+            type: 'object',
+            properties: {
+              enabled: bool,
+              enabledAt: nullable(dateTime),
+              recoveryCodesRemaining: int,
+              totp: { type: 'object', properties: { enabled: bool, pending: { ...bool, description: 'Setup started, not confirmed; finished in Settings or at next sign-in.' } } },
+              passkeys: arrayOf(ref('Passkey')),
+            },
+          }),
           ...errors(401),
         },
       },
@@ -704,33 +729,61 @@ export const openApiDocument = {
     '/api/auth/me/2fa/setup': {
       post: {
         tags: ['Auth'],
-        summary: 'Start two-factor setup',
-        description: 'Generates a new secret (pending until confirmed). Show `qrCodeDataUrl` as an `<img>`; `secret` is for manual entry.',
+        summary: 'Start authenticator-app setup',
+        description:
+          'Requires the password. Parks a secret as pending until confirmed. Calling again returns the **same** secret and QR code. ' +
+          'Until confirmed, signing in shows this QR on the login page (`twoFactorSetupRequired`). Show `qrCodeDataUrl` as an `<img>`; `secret` is for manual entry.',
         security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
         responses: {
           '200': success({ type: 'object', properties: { secret: str(), otpauthUrl: str(), qrCodeDataUrl: str({ example: 'data:image/png;base64,...' }) } }),
-          '409': errorResponse('Already enabled', 'TWO_FACTOR_ALREADY_ENABLED', 'Two-factor authentication is already enabled'),
-          ...errors(401),
+          '409': errorResponse('Already set up', 'TWO_FACTOR_ALREADY_ENABLED', 'Your authenticator app is already set up'),
+          ...errors(400, 401, 429),
         },
+      },
+      delete: {
+        tags: ['Auth'],
+        summary: 'Cancel a pending authenticator setup',
+        security: secured,
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(401) },
       },
     },
     '/api/auth/me/2fa/enable': {
       post: {
         tags: ['Auth'],
-        summary: 'Confirm setup and enable two-factor',
-        description: 'Verifies a code from the app against the pending secret. Returns 10 recovery codes — they are shown only once.',
+        summary: 'Confirm authenticator setup',
+        description: 'Verifies a code against the pending secret. Returns 10 recovery codes (shown once) when this turns 2FA on; `null` when a passkey already had.',
         security: secured,
         requestBody: body({ type: 'object', required: ['code'], properties: { code: str({ example: '123456' }) } }),
         responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 409, 429) },
+      },
+    },
+    '/api/auth/me/2fa/totp': {
+      delete: {
+        tags: ['Auth'],
+        summary: 'Remove the authenticator app',
+        description: 'Requires the password. With no passkey left, 2FA turns off.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object', properties: { twoFactorEnabled: bool } }), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/step-up/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passkey options for a sensitive change',
+        description: 'WebAuthn request options; sign them with a passkey and send the result as `passkey` to disable or regenerate recovery codes.',
+        security: secured,
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401) },
       },
     },
     '/api/auth/me/2fa/disable': {
       post: {
         tags: ['Auth'],
         summary: 'Disable two-factor',
-        description: 'Requires the account password and a current authenticator or recovery code.',
+        description: 'Requires the password plus one of: `code` (authenticator or recovery) or `passkey`. Removes every method and recovery code.',
         security: secured,
-        requestBody: body({ type: 'object', required: ['password', 'code'], properties: { password: str(), code: str() } }),
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str(), code: str({ description: 'Authenticator or recovery code' }), passkey: { type: 'object', description: 'WebAuthn assertion signed over `/api/auth/me/2fa/step-up/options`' } } }),
         responses: { '200': success(nullable({ type: 'object' })), ...errors(400, 401, 429) },
       },
     },
@@ -738,10 +791,77 @@ export const openApiDocument = {
       post: {
         tags: ['Auth'],
         summary: 'Regenerate recovery codes',
-        description: 'Requires a current code. Replaces all recovery codes; the old ones stop working.',
+        description: 'Requires a current `code` or a `passkey`. Replaces all recovery codes; the old ones stop working.',
         security: secured,
-        requestBody: body({ type: 'object', required: ['code'], properties: { code: str() } }),
+        requestBody: body({ type: 'object', properties: { code: str(), passkey: { type: 'object' } } }),
         responses: { '200': success(ref('RecoveryCodes')), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/passkeys/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Start adding a passkey',
+        description: 'Requires the password. Returns WebAuthn creation options for `navigator.credentials.create()`.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401, 429) },
+      },
+    },
+    '/api/auth/me/2fa/passkeys': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Finish adding a passkey',
+        description: 'Verifies the browser attestation. Returns recovery codes (shown once) when this turns 2FA on; `null` otherwise.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['response'], properties: { response: { type: 'object' }, name: str({ example: 'MacBook Touch ID' }) } }),
+        responses: {
+          '201': success({ type: 'object', properties: { passkey: ref('Passkey'), recoveryCodes: nullable(arrayOf(str())) } }),
+          '400': errorResponse('Verification failed', 'PASSKEY_VERIFICATION_FAILED', 'That passkey could not be verified.'),
+          ...errors(401),
+        },
+      },
+    },
+    '/api/auth/me/2fa/passkeys/{id}': {
+      delete: {
+        tags: ['Auth'],
+        summary: 'Remove a passkey',
+        description: 'Requires the password. Removing the last sign-in method turns 2FA off.',
+        security: secured,
+        requestBody: body({ type: 'object', required: ['password'], properties: { password: str() } }),
+        responses: { '200': success({ type: 'object', properties: { twoFactorEnabled: bool } }), ...errors(400, 401, 404, 429) },
+      },
+    },
+    '/api/auth/login/2fa/setup': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Finish a pending authenticator setup at sign-in',
+        description: 'For a `twoFactorSetupRequired` login: a code from the newly scanned app turns 2FA on, sets the auth cookies and returns recovery codes (shown once).',
+        requestBody: body({ type: 'object', required: ['challengeToken', 'code'], properties: { challengeToken: str(), code: str({ example: '123456' }) } }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str(), recoveryCodes: arrayOf(str()) } }),
+          ...errors(400, 401, 429),
+        },
+      },
+    },
+    '/api/auth/login/2fa/passkey/options': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Passkey sign-in options',
+        description: 'WebAuthn request options for `navigator.credentials.get()`, bound to this sign-in attempt.',
+        requestBody: body({ type: 'object', required: ['challengeToken'], properties: { challengeToken: str() } }),
+        responses: { '200': success({ type: 'object' }), ...errors(400, 401) },
+      },
+    },
+    '/api/auth/login/2fa/passkey': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Complete a two-factor sign-in with a passkey',
+        requestBody: body({ type: 'object', required: ['challengeToken', 'response'], properties: { challengeToken: str(), response: { type: 'object' } } }),
+        responses: {
+          '200': success({ type: 'object', properties: { user: ref('AuthUser'), accessToken: str() } }),
+          '400': errorResponse('Passkey rejected', 'PASSKEY_VERIFICATION_FAILED', 'That passkey could not be verified.'),
+          ...errors(401, 429),
+        },
       },
     },
     '/api/auth/register': {

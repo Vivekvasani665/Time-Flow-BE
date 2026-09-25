@@ -55,12 +55,53 @@ export const resendLoginOtpSchema = z
   })
   .strict();
 
+const challengeToken = z.string({ message: 'Challenge token is required' }).min(1, 'Challenge token is required').max(2048);
+const password = z.string({ message: 'Password is required' }).min(1, 'Password is required').max(128);
+
+/**
+ * A WebAuthn response as `@simplewebauthn/browser` produces it. Only the shape
+ * is checked here; the signature itself is verified by the passkey service.
+ */
+const webAuthnResponse = z
+  .object({
+    id: z.string().min(1).max(1024),
+    rawId: z.string().min(1).max(1024),
+    type: z.literal('public-key'),
+    response: z.record(z.string(), z.unknown()),
+    clientExtensionResults: z.record(z.string(), z.unknown()).default({}),
+    authenticatorAttachment: z.string().max(32).optional(),
+  })
+  .loose();
+
+/** Proof of the second factor: a code (authenticator or recovery) or a passkey — exactly one. */
+const proofFields = { code: twoFactorCode.optional(), passkey: webAuthnResponse.optional() };
+const oneProof = <T extends { code?: string; passkey?: unknown }>(v: T) => (v.code === undefined) !== (v.passkey === undefined);
+const oneProofMessage = { message: 'Enter a code or use a passkey', path: ['code'] };
+
 export const twoFactorCodeSchema = z.object({ code: twoFactorCode }).strict();
 
+export const twoFactorProofSchema = z.object(proofFields).strict().refine(oneProof, oneProofMessage);
+
 export const disableTwoFactorSchema = z
+  .object({ password, ...proofFields })
+  .strict()
+  .refine(oneProof, oneProofMessage);
+
+/** Adding or removing a sign-in method re-checks the password. */
+export const passwordConfirmSchema = z.object({ password }).strict();
+
+export const registerPasskeySchema = z
+  .object({ response: webAuthnResponse, name: trimmed(1, 80, 'Passkey name').optional() })
+  .strict();
+
+export const passkeyLoginOptionsSchema = z.object({ challengeToken }).strict();
+
+export const passkeyLoginSchema = z.object({ challengeToken, response: webAuthnResponse }).strict();
+
+export const twoFactorSetupLoginSchema = z
   .object({
-    password: z.string({ message: 'Password is required' }).min(1, 'Password is required').max(128),
-    code: twoFactorCode,
+    challengeToken,
+    code: z.string({ message: 'Code is required' }).trim().regex(/^\d{6}$/, 'Enter the 6-digit code from your authenticator app'),
   })
   .strict();
 

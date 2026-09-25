@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import type { CookieOptions, Request, Response } from 'express';
 import { env } from '../../config/env';
 import { randomToken, sha256 } from '../../common/utils/crypto';
-import type { AccessTokenPayload, TwoFactorChallengePayload, VerifiedAccessToken, VerifiedTwoFactorChallenge } from './auth.types';
+import type { AccessTokenPayload, TwoFactorChallengePayload, TwoFactorChallengePurpose, VerifiedAccessToken, VerifiedTwoFactorChallenge } from './auth.types';
 
 export const ACCESS_COOKIE = 'tf_access';
 export const REFRESH_COOKIE = 'tf_refresh';
@@ -75,7 +75,7 @@ export const tokenService = {
    * The payload, or why it was refused. `expired` is told apart so the client
    * can say "sign in again" rather than "something is wrong".
    */
-  verifyTwoFactorChallenge(token: string): VerifiedTwoFactorChallenge | 'expired' | 'invalid' {
+  verifyTwoFactorChallenge(token: string, purpose: TwoFactorChallengePurpose): VerifiedTwoFactorChallenge | 'expired' | 'invalid' {
     try {
       const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
         algorithms: ['HS256'],
@@ -87,11 +87,13 @@ export const tokenService = {
         typeof decoded.sub !== 'string' ||
         typeof decoded.tv !== 'number' ||
         typeof decoded.jti !== 'string' ||
-        typeof decoded.exp !== 'number'
+        typeof decoded.exp !== 'number' ||
+        // A setup challenge must never pass for a verify one, or the reverse.
+        decoded.pur !== purpose
       ) {
         return 'invalid';
       }
-      return { sub: decoded.sub, tv: decoded.tv, jti: decoded.jti, exp: decoded.exp };
+      return { sub: decoded.sub, tv: decoded.tv, pur: purpose, jti: decoded.jti, exp: decoded.exp };
     } catch (err) {
       return err instanceof jwt.TokenExpiredError ? 'expired' : 'invalid';
     }
