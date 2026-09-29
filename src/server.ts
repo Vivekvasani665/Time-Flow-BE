@@ -6,6 +6,7 @@ import { prisma } from './lib/prisma';
 import { redis } from './lib/redis';
 import { closeQueues } from './queue/queues';
 import { closeProducerConnection } from './queue/connection';
+import { startWorkers } from './queue/workers';
 import { notificationHub } from './modules/notifications/notification-stream';
 import { createApp } from './app';
 
@@ -15,6 +16,10 @@ async function main(): Promise<void> {
   for (const warning of productionWarnings()) logger.warn(warning);
   await prisma.$connect();
   const app = createApp();
+  // No separate worker service (e.g. Render's free plan): consume the queues
+  // here, or queued mail is never sent.
+  const workers = env.RUN_WORKER_IN_API ? await startWorkers() : null;
+
   const server: Server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, `TimeFlow API listening on :${env.PORT}`);
   });
@@ -43,7 +48,8 @@ async function main(): Promise<void> {
     server.closeIdleConnections();
     await closed;
 
-    // 2. Release infrastructure.
+    // 2. Let in-process jobs finish, then release infrastructure.
+    await workers?.close();
     await closeQueues();
     await closeProducerConnection();
     await Promise.allSettled([prisma.$disconnect(), redis.quit()]);

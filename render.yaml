@@ -57,9 +57,14 @@ services:
         value: log
       - key: INBOUND_SYNC_ENABLED
         value: "false"
+      # No worker service on the free plan, so the API sends the queued mail
+      # itself. Set to false if you add the timeflow-worker service below.
+      - key: RUN_WORKER_IN_API
+        value: "true"
 
   # The background worker (emails, activity logs, inbox sync). Render has no
-  # free plan for workers — uncomment to add one on the Starter plan.
+  # free plan for workers — uncomment to add one on the Starter plan, and set
+  # RUN_WORKER_IN_API to false on timeflow-api.
   # - type: worker
   #   name: timeflow-worker
   #   runtime: node

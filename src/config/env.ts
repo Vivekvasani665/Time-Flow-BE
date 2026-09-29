@@ -158,6 +158,12 @@ const EnvSchema = z.object({
   INBOUND_SYNC_ENABLED: bool.default(true),
   INBOUND_POLL_SECONDS: z.coerce.number().int().min(10).default(30),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
+  /**
+   * Runs the queue workers (email, activity, inbox sync) inside the API
+   * process, for hosts with no separate worker service. Leave off when
+   * `npm run start:worker` runs on its own.
+   */
+  RUN_WORKER_IN_API: bool.default(false),
 
   UPLOAD_DIR: z.string().default('./uploads'),
 
