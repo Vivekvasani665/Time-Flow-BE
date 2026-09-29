@@ -109,6 +109,9 @@ model User {
   requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
   sentInvitations UserInvitation[]        @relation("InvitationSender")
   invitation      UserInvitation?         @relation("InvitationAcceptedUser")
+  chatMessages    ChatMessage[]
+  chatReactions   ChatMessageReaction[]
+  chatReadState   ChatReadState?
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -261,6 +264,57 @@ model Notification {
 
   @@index([userId, readAt, createdAt(sort: Desc)])
   @@map("notifications")
+}
+
+/// A message in the global chat room. Deleting is soft: the row stays (replies
+/// keep their thread) but its content is never served again.
+model ChatMessage {
+  id        String    @id @default(uuid()) @db.Uuid
+  senderId  String    @map("sender_id") @db.Uuid
+  /// Plain text, max 2000 characters. Rendered as text by the client, never as HTML.
+  content   String    @db.VarChar(2000)
+  replyToId String?   @map("reply_to_id") @db.Uuid
+  editedAt  DateTime? @map("edited_at") @db.Timestamptz(3)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sender    User                  @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  replyTo   ChatMessage?          @relation("ChatMessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   ChatMessage[]         @relation("ChatMessageReplies")
+  reactions ChatMessageReaction[]
+
+  /// Cursor pagination walks (createdAt, id) newest-first.
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([senderId])
+  @@index([replyToId])
+  @@map("chat_messages")
+}
+
+model ChatMessageReaction {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  emoji     String   @db.VarChar(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+  @@map("chat_message_reactions")
+}
+
+/// How far each user has read the global chat; drives the sidebar unread badge.
+model ChatReadState {
+  userId     String   @id @map("user_id") @db.Uuid
+  lastReadAt DateTime @map("last_read_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("chat_read_states")
 }
 
 /// A passkey (WebAuthn credential) used as a second factor: Face ID, Touch ID,

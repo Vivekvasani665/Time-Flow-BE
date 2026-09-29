@@ -27,6 +27,7 @@ import { emailRouter } from './modules/emails/email.routes';
 import { mailSettingsRouter } from './modules/emails/mail-settings.routes';
 import { adminPasswordResetRouter, publicPasswordResetRouter } from './modules/password-resets/password-reset.routes';
 import { adminInvitationRouter, publicInvitationRouter } from './modules/invitations/invitation.routes';
+import { chatRouter } from './modules/chat/chat.routes';
 import { P } from './modules/permissions/permission-catalog';
 
 export type AppOptions = { enableBullBoard?: boolean };
@@ -88,6 +89,7 @@ export function createApp({ enableBullBoard = !isTest }: AppOptions = {}): Expre
   app.use('/api/activity-logs', activityLogRouter);
   app.use('/api/dashboard', dashboardRouter);
   app.use('/api/notifications', notificationRouter);
+  app.use('/api/chat', chatRouter);
   app.use('/api/uploads', uploadRouter);
   app.use('/api/queues', queueRouter);
   // Before /api/emails so the literal path is not eaten by /:id.

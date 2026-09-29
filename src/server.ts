@@ -7,6 +7,7 @@ import { redis } from './lib/redis';
 import { closeQueues } from './queue/queues';
 import { closeProducerConnection } from './queue/connection';
 import { notificationHub } from './modules/notifications/notification-stream';
+import { attachChatSocket } from './modules/chat/chat.socket';
 import { createApp } from './app';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -18,6 +19,8 @@ async function main(): Promise<void> {
   const server: Server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, env: env.NODE_ENV }, `TimeFlow API listening on :${env.PORT}`);
   });
+  // Real-time chat shares this server (and port) with the REST API.
+  const chat = attachChatSocket(server);
 
   const sockets = new Set<Socket>();
   server.on('connection', (socket) => {
@@ -37,9 +40,9 @@ async function main(): Promise<void> {
     }, SHUTDOWN_TIMEOUT_MS);
     force.unref();
 
-    // 1. Stop accepting connections; close SSE streams so in-flight requests can drain.
+    // 1. Stop accepting connections; close SSE streams and chat sockets so in-flight requests can drain.
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-    await notificationHub.close();
+    await Promise.all([notificationHub.close(), chat.close()]);
     server.closeIdleConnections();
     await closed;
 

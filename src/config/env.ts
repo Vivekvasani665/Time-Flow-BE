@@ -107,6 +107,9 @@ const EnvSchema = z.object({
    *  a far tighter budget than a read — and counted per user, not per IP. */
   RATE_LIMIT_EMAIL_MAX: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_EMAIL_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  /** Chat messages per user, shared by the REST endpoint and the socket. */
+  RATE_LIMIT_CHAT_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_CHAT_WINDOW_SECONDS: z.coerce.number().int().positive().default(10),
 
   /**
    * Chooses the outgoing transport explicitly, so moving between environments
