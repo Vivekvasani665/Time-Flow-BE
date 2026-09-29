@@ -51,6 +51,17 @@ const body = (schema: Schema, contentType = 'application/json'): Schema => ({
 
 const q = (name: string, schema: Schema, description?: string): Schema => ({ name, in: 'query', required: false, schema, description });
 const idParam: Schema = { name: 'id', in: 'path', required: true, schema: uuid };
+
+/** Message fields shared by compose, draft update and draft send. */
+const EMAIL_MESSAGE_PROPS: Schema = {
+  to: { ...arrayOf(str({ format: 'email' })), description: 'Recipients. Combine freely with toUserId / toEmail.' },
+  cc: arrayOf(str({ format: 'email' })),
+  bcc: arrayOf(str({ format: 'email' })),
+  subject: str({ maxLength: 200 }),
+  body: str({ maxLength: 20000, description: 'Plain text; line breaks are kept.' }),
+  attachmentIds: { ...arrayOf(uuid), maxItems: 10, description: 'Ids from POST /api/emails/attachments.' },
+};
+
 const listParams = (sortable: string[]): Schema[] => [
   q('page', { ...int, minimum: 1, default: 1 }),
   q('limit', { ...int, minimum: 1, maximum: 100, default: 10 }),
@@ -552,15 +563,21 @@ export const openApiDocument = {
           finishedOn: nullable(int),
         },
       },
+      EmailAttachment: {
+        type: 'object',
+        properties: { id: uuid, fileName: str(), mimeType: str(), size: { ...int, description: 'Bytes' } },
+      },
       EmailLog: {
         type: 'object',
         properties: {
           id: uuid,
-          to: str(),
+          to: str({ description: 'The To line: one address, or several joined with ", ".' }),
+          cc: arrayOf(str()),
           fromAddress: str(),
           subject: str(),
           template: str(),
-          status: enumOf('QUEUED', 'SENT', 'FAILED'),
+          status: enumOf('DRAFT', 'QUEUED', 'SENT', 'FAILED'),
+          _count: { type: 'object', properties: { attachments: int } },
           attempts: int,
           lastError: nullable(str()),
           readAt: nullable(dateTime),
@@ -572,14 +589,18 @@ export const openApiDocument = {
       },
       EmailDetail: {
         type: 'object',
-        description: 'An EmailLog plus the rendered body, returned by `GET /api/emails/{id}`.',
+        description: 'An EmailLog plus the rendered body, returned by `GET /api/emails/{id}`. On a DRAFT, `bodyText` is the text as typed.',
         properties: {
           id: uuid,
           to: str(),
+          cc: arrayOf(str()),
+          bcc: { ...arrayOf(str()), description: 'Empty unless you are the sender (or hold `emails.view_all`).' },
           fromAddress: str(),
           subject: str(),
           template: str(),
-          status: enumOf('QUEUED', 'SENT', 'FAILED'),
+          status: enumOf('DRAFT', 'QUEUED', 'SENT', 'FAILED'),
+          providerMessageId: nullable(str({ description: 'The delivery provider’s own id for the message.' })),
+          attachments: arrayOf(ref('EmailAttachment')),
           attempts: int,
           lastError: nullable(str()),
           readAt: nullable(dateTime),
@@ -601,6 +622,7 @@ export const openApiDocument = {
           failed: int,
           unread: int,
           last24h: int,
+          drafts: { ...int, description: 'Your own drafts, whatever the scope.' },
           scope: enumOf('all', 'own'),
         },
       },
@@ -1350,12 +1372,12 @@ export const openApiDocument = {
       get: {
         tags: ['Emails'],
         summary: 'List mailbox messages',
-        description: `${perm('emails.view')} \`box=inbox\` returns mail addressed to you, \`box=sent\` mail your actions triggered, and \`box=all\` everything (requires \`emails.view_all\`). Bodies are omitted from list rows.`,
+        description: `${perm('emails.view')} \`box=inbox\` returns mail addressed to you, \`box=sent\` mail your actions triggered, \`box=drafts\` your unsent drafts, and \`box=all\` everything sent (requires \`emails.view_all\`; never includes drafts). Bodies are omitted from list rows. \`/api/emails/inbox\`, \`/sent\` and \`/drafts\` are shortcuts for the \`box\` values.`,
         security: secured,
         parameters: [
           q('page', int),
           q('limit', int),
-          q('box', enumOf('inbox', 'sent', 'all')),
+          q('box', enumOf('inbox', 'sent', 'drafts', 'all')),
           q('status', enumOf('QUEUED', 'SENT', 'FAILED')),
           q('search', str()),
           q('unreadOnly', enumOf('true', 'false')),
@@ -1364,21 +1386,52 @@ export const openApiDocument = {
       },
       post: {
         tags: ['Emails'],
-        summary: 'Send a message to another user',
-        description: `${perm('emails.send')} An address belonging to an active user resolves to them, so it reaches their Inbox as well as SMTP. Any other address is SMTP-only from the org sender identity and additionally requires \`emails.send_external\`; an address belonging to a deactivated account is rejected.`,
+        summary: 'Send a message, or save it as a draft',
+        description: `${perm('emails.send')} Sends one message to every address on To, Cc and Bcc. The first To address belonging to an active user also puts it in their Inbox. Any address outside the team goes out from the org sender identity and requires \`emails.send_external\`; an address belonging to a deactivated account is rejected. With \`draft: true\` nothing is sent and every field is optional — recipients are checked when the draft is sent.`,
         security: secured,
         requestBody: body({
           type: 'object',
-          required: ['toUserId', 'subject', 'body'],
           properties: {
-            toUserId: uuid,
-            toEmail: str(),
-            subject: str(),
-            body: str(),
+            toUserId: { ...uuid, description: 'A team member. The original single-recipient form; still supported.' },
+            toEmail: str({ description: 'One address. The original single-recipient form; still supported.' }),
+            ...EMAIL_MESSAGE_PROPS,
             replyToId: { ...uuid, description: 'Threads this under a message you are a party to.' },
+            draft: { ...bool, default: false },
           },
         }),
-        responses: { '201': success({ type: 'object', properties: { id: uuid } }), ...errors(400, 401, 403, 404) },
+        responses: {
+          '201': success({ type: 'object', properties: { id: uuid, status: enumOf('DRAFT') } }),
+          ...errors(400, 401, 403, 404, 413),
+        },
+      },
+    },
+    '/api/emails/inbox': {
+      get: { tags: ['Emails'], summary: 'Inbox (same as box=inbox)', security: secured, responses: { '200': paginatedOf(ref('EmailLog')), ...errors(401, 403) } },
+    },
+    '/api/emails/sent': {
+      get: { tags: ['Emails'], summary: 'Sent (same as box=sent)', security: secured, responses: { '200': paginatedOf(ref('EmailLog')), ...errors(401, 403) } },
+    },
+    '/api/emails/drafts': {
+      get: { tags: ['Emails'], summary: 'Drafts (same as box=drafts)', security: secured, responses: { '200': paginatedOf(ref('EmailLog')), ...errors(401, 403) } },
+    },
+    '/api/emails/attachments': {
+      post: {
+        tags: ['Emails'],
+        summary: 'Upload a file to attach',
+        description: `${perm('emails.send')} Multipart field \`file\`, up to 10 MB; at most 18 MB per message. Executable types Gmail blocks (.exe, .js, .bat, …) are refused. Returns an id to pass in \`attachmentIds\`. Uploads never attached to a message are removed after 24 hours.`,
+        security: secured,
+        requestBody: body({ type: 'object', required: ['file'], properties: { file: str({ format: 'binary' }) } }, 'multipart/form-data'),
+        responses: { '201': success(ref('EmailAttachment')), ...errors(400, 401, 403, 413) },
+      },
+    },
+    '/api/emails/attachments/{id}': {
+      delete: {
+        tags: ['Emails'],
+        summary: 'Remove an unsent upload',
+        description: `${perm('emails.send')} Only your own upload, and only while it is unattached or on a draft.`,
+        security: secured,
+        parameters: [idParam],
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(401, 403, 404, 409) },
       },
     },
     '/api/emails/stats': {
@@ -1399,13 +1452,43 @@ export const openApiDocument = {
         parameters: [{ name: 'id', in: 'path', required: true, schema: uuid }],
         responses: { '200': success(ref('EmailDetail')), ...errors(401, 403, 404) },
       },
+      patch: {
+        tags: ['Emails'],
+        summary: 'Update a draft',
+        description: `${perm('emails.send')} Autosave. Only the fields sent change; \`attachmentIds\` replaces the draft's attachments (removed ones are deleted). 409 once the message has been sent.`,
+        security: secured,
+        parameters: [idParam],
+        requestBody: body({ type: 'object', properties: EMAIL_MESSAGE_PROPS }),
+        responses: { '200': success(ref('EmailDetail')), ...errors(400, 401, 403, 404, 409, 413) },
+      },
       delete: {
         tags: ['Emails'],
         summary: 'Delete a message from your mailbox',
-        description: `${perm('emails.view')} A per-side soft delete: it disappears from your Inbox or Sent, the other party keeps their copy, and the delivery record survives for \`emails.view_all\`. You must be the sender or the recipient — \`emails.view_all\` does not grant this.`,
+        description: `${perm('emails.view')} A draft is discarded outright, with its attachments. Anything else is a per-side soft delete: it disappears from your Inbox or Sent, the other party keeps their copy, and the delivery record survives for \`emails.view_all\`. You must be the sender or the recipient — \`emails.view_all\` does not grant this.`,
         security: secured,
         parameters: [{ name: 'id', in: 'path', required: true, schema: uuid }],
         responses: { '200': success(nullable({ type: 'object' })), ...errors(401, 403, 404) },
+      },
+    },
+    '/api/emails/{id}/send': {
+      post: {
+        tags: ['Emails'],
+        summary: 'Send a draft',
+        description: `${perm('emails.send')} The body may carry last edits (same fields as PATCH), applied first. The draft must have a recipient, a subject and a body; recipients are checked as for POST /api/emails. It becomes QUEUED in Sent and the worker delivers it. 409 if it was already sent.`,
+        security: secured,
+        parameters: [idParam],
+        requestBody: { required: false, content: { 'application/json': { schema: { type: 'object', properties: EMAIL_MESSAGE_PROPS } } } },
+        responses: { '200': success({ type: 'object', properties: { id: uuid } }), ...errors(400, 401, 403, 404, 409, 413) },
+      },
+    },
+    '/api/emails/{id}/attachments/{attachmentId}': {
+      get: {
+        tags: ['Emails'],
+        summary: 'Download an attachment',
+        description: `${perm('emails.view')} Served as a download. Anyone who can open the message can download its files.`,
+        security: secured,
+        parameters: [idParam, { name: 'attachmentId', in: 'path', required: true, schema: uuid }],
+        responses: { '200': { description: 'The file' }, ...errors(401, 403, 404) },
       },
     },
     '/api/emails/{id}/read': {

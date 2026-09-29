@@ -114,12 +114,23 @@ const EnvSchema = z.object({
    *   mailpit — local catcher, no auth (development)
    *   gmail   — smtp.gmail.com with GMAIL_USER + GMAIL_APP_PASSWORD (production)
    *   smtp    — any other provider, configured through the SMTP_* vars
+   *   resend  — Resend HTTPS API; needs RESEND_API_KEY
+   *   sendgrid — SendGrid HTTPS API; needs SENDGRID_API_KEY
+   *   brevo   — Brevo HTTPS API; needs BREVO_API_KEY (the same xkeysib- key as SMS)
    *   log     — serialise the message instead of sending it
+   * The three API providers send from SMTP_FROM (alias EMAIL_FROM), which must
+   * be a sender or domain verified with that provider. They also work on hosts
+   * that block outbound SMTP ports, such as Render's free plan.
    * Left unset, the transport is inferred from SMTP_HOST as it always was.
    */
   // Preprocessed so `EMAIL_PROVIDER=` (present but blank, as .env files often
   // leave it) means "unset" rather than failing validation at boot.
-  EMAIL_PROVIDER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['mailpit', 'gmail', 'smtp', 'log']).optional()),
+  EMAIL_PROVIDER: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.enum(['mailpit', 'gmail', 'smtp', 'resend', 'sendgrid', 'brevo', 'log']).optional(),
+  ),
+  RESEND_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  SENDGRID_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
   /**
    * Safety catch: outside production, a provider that reaches real inboxes is
    * refused unless this is explicitly set. Prevents a stray test run from
@@ -161,12 +172,13 @@ const EnvSchema = z.object({
 export type Env = z.infer<typeof EnvSchema>;
 
 function loadEnv(): Env {
-  // SMTP_PASSWORD is accepted as an alias, since many hosting guides use that name,
+  // SMTP_PASSWORD and EMAIL_FROM are accepted as aliases, since many hosting guides use those names,
   // and the generic SMS_API_KEY / SMS_TEMPLATE_ID / SMS_SENDER_ID for the SMS provider's.
   const e = process.env;
   const parsed = EnvSchema.safeParse({
     ...e,
     SMTP_PASS: e.SMTP_PASS || e.SMTP_PASSWORD,
+    SMTP_FROM: e.SMTP_FROM || e.EMAIL_FROM || undefined,
     MSG91_AUTH_KEY: e.MSG91_AUTH_KEY || e.SMS_API_KEY,
     TWOFACTOR_API_KEY: e.TWOFACTOR_API_KEY || e.SMS_API_KEY,
     BREVO_API_KEY: e.BREVO_API_KEY || e.SMS_API_KEY,

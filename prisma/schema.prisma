@@ -42,6 +42,8 @@ enum Priority {
 }
 
 enum EmailStatus {
+  /// Composed but not sent: visible only to its author, in Drafts.
+  DRAFT
   QUEUED
   SENT
   FAILED
@@ -90,25 +92,26 @@ model User {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
 
-  role            Role                    @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  managedProjects Project[]               @relation("ProjectManager")
-  createdProjects Project[]               @relation("ProjectCreator")
-  memberships     ProjectMember[]
-  assignedTasks   Task[]                  @relation("TaskAssignee")
-  createdTasks    Task[]                  @relation("TaskCreator")
-  activityLogs    ActivityLog[]
-  notifications   Notification[]
-  refreshTokens   RefreshToken[]
-  recoveryCodes   TwoFactorRecoveryCode[]
-  passkeys        WebAuthnCredential[]
-  loginOtps       LoginOtp[]
-  signupOtps      SignupOtp[]
-  emailsReceived  EmailLog[]              @relation("EmailsReceived")
-  emailsSent      EmailLog[]              @relation("EmailsSent")
-  passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
-  requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
-  sentInvitations UserInvitation[]        @relation("InvitationSender")
-  invitation      UserInvitation?         @relation("InvitationAcceptedUser")
+  role             Role                    @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  managedProjects  Project[]               @relation("ProjectManager")
+  createdProjects  Project[]               @relation("ProjectCreator")
+  memberships      ProjectMember[]
+  assignedTasks    Task[]                  @relation("TaskAssignee")
+  createdTasks     Task[]                  @relation("TaskCreator")
+  activityLogs     ActivityLog[]
+  notifications    Notification[]
+  refreshTokens    RefreshToken[]
+  recoveryCodes    TwoFactorRecoveryCode[]
+  passkeys         WebAuthnCredential[]
+  loginOtps        LoginOtp[]
+  signupOtps       SignupOtp[]
+  emailsReceived   EmailLog[]              @relation("EmailsReceived")
+  emailsSent       EmailLog[]              @relation("EmailsSent")
+  emailAttachments EmailAttachment[]       @relation("EmailAttachmentsUploaded")
+  passwordResets   PasswordResetRequest[]  @relation("PasswordResetTarget")
+  requestedResets  PasswordResetRequest[]  @relation("PasswordResetRequester")
+  sentInvitations  UserInvitation[]        @relation("InvitationSender")
+  invitation       UserInvitation?         @relation("InvitationAcceptedUser")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -443,48 +446,57 @@ model RefreshToken {
 /// Outbox-style record of every transactional email so queue behaviour
 /// (attempts, failures, retries) is observable from the database and UI.
 model EmailLog {
-  id              String         @id @default(uuid()) @db.Uuid
-  to              String         @db.VarChar(254)
-  fromAddress     String         @map("from_address") @db.VarChar(254)
+  id                String         @id @default(uuid()) @db.Uuid
+  /// The To line: one address, or several joined with ", ". Empty on a draft
+  /// that has no recipient yet.
+  to                String
+  /// Extra recipients. Bcc is only ever shown to the sender.
+  cc                String[]       @default([])
+  bcc               String[]       @default([])
+  fromAddress       String         @map("from_address") @db.VarChar(254)
   /// Display name of an inbound sender; outbound mail carries it in fromAddress.
-  fromName        String?        @map("from_name") @db.VarChar(120)
-  subject         String         @db.VarChar(200)
-  template        String         @db.VarChar(60)
-  direction       EmailDirection @default(OUTBOUND)
+  fromName          String?        @map("from_name") @db.VarChar(120)
+  subject           String         @db.VarChar(200)
+  template          String         @db.VarChar(60)
+  direction         EmailDirection @default(OUTBOUND)
   /// RFC 5322 Message-ID. Set on outbound mail when it is handed to SMTP, and
   /// on inbound mail from its header, so replies can be matched to a thread.
-  messageId       String?        @unique @map("message_id") @db.VarChar(512)
+  messageId         String?        @unique @map("message_id") @db.VarChar(512)
   /// The Message-ID this message answers, as the sender's client reported it.
-  inReplyTo       String?        @map("in_reply_to") @db.VarChar(512)
+  inReplyTo         String?        @map("in_reply_to") @db.VarChar(512)
+  /// The id the delivery provider gave the message (Resend / SendGrid / Brevo
+  /// id, or the SMTP Message-ID), for looking it up in the provider's dashboard.
+  providerMessageId String?        @map("provider_message_id") @db.VarChar(255)
   /// Rendered at enqueue time so the message is readable while QUEUED or FAILED,
   /// not only once delivery succeeds.
-  bodyHtml        String?        @map("body_html")
-  bodyText        String?        @map("body_text")
+  bodyHtml          String?        @map("body_html")
+  bodyText          String?        @map("body_text")
   /// Recipient — owns this message in their Inbox.
-  toUserId        String?        @map("to_user_id") @db.Uuid
+  toUserId          String?        @map("to_user_id") @db.Uuid
   /// Whoever triggered the send — owns this message in their Sent folder.
-  fromUserId      String?        @map("from_user_id") @db.Uuid
-  readAt          DateTime?      @map("read_at") @db.Timestamptz(3)
+  fromUserId        String?        @map("from_user_id") @db.Uuid
+  readAt            DateTime?      @map("read_at") @db.Timestamptz(3)
   /// Threading: set when this message was composed as a reply to another.
-  replyToId       String?        @map("reply_to_id") @db.Uuid
+  replyToId         String?        @map("reply_to_id") @db.Uuid
   /// Per-side soft delete. One row is both parties' copy of the message, so
   /// each side hides it from their own folder without touching the other's.
-  deletedByToAt   DateTime?      @map("deleted_by_to_at") @db.Timestamptz(3)
-  deletedByFromAt DateTime?      @map("deleted_by_from_at") @db.Timestamptz(3)
-  status          EmailStatus    @default(QUEUED)
-  attempts        Int            @default(0)
-  lastError       String?        @map("last_error") @db.VarChar(1000)
+  deletedByToAt     DateTime?      @map("deleted_by_to_at") @db.Timestamptz(3)
+  deletedByFromAt   DateTime?      @map("deleted_by_from_at") @db.Timestamptz(3)
+  status            EmailStatus    @default(QUEUED)
+  attempts          Int            @default(0)
+  lastError         String?        @map("last_error") @db.VarChar(1000)
   /// BullMQ job id. Composite ids (template + entity + recipient) run well past
   /// 64 characters, so this is sized for them rather than for a bare UUID.
-  jobId           String?        @map("job_id") @db.VarChar(255)
-  sentAt          DateTime?      @map("sent_at") @db.Timestamptz(3)
-  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  jobId             String?        @map("job_id") @db.VarChar(255)
+  sentAt            DateTime?      @map("sent_at") @db.Timestamptz(3)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  toUser   User?      @relation("EmailsReceived", fields: [toUserId], references: [id], onDelete: SetNull)
-  fromUser User?      @relation("EmailsSent", fields: [fromUserId], references: [id], onDelete: SetNull)
-  replyTo  EmailLog?  @relation("EmailThread", fields: [replyToId], references: [id], onDelete: SetNull)
-  replies  EmailLog[] @relation("EmailThread")
+  toUser      User?             @relation("EmailsReceived", fields: [toUserId], references: [id], onDelete: SetNull)
+  fromUser    User?             @relation("EmailsSent", fields: [fromUserId], references: [id], onDelete: SetNull)
+  replyTo     EmailLog?         @relation("EmailThread", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies     EmailLog[]        @relation("EmailThread")
+  attachments EmailAttachment[]
 
   @@index([status, createdAt])
   /// Unread badge: counts by recipient without reading rows.
@@ -493,6 +505,30 @@ model EmailLog {
   @@index([toUserId, deletedByToAt, createdAt(sort: Desc)])
   @@index([fromUserId, deletedByFromAt, createdAt(sort: Desc)])
   @@map("email_logs")
+}
+
+/// A file sent with a mailbox message. The bytes live in the database rather
+/// than on disk because the API (which receives the upload) and the worker
+/// (which sends the mail) run as separate services with separate disks.
+/// Uploaded first with no email, then claimed by a draft or a send.
+model EmailAttachment {
+  id           String   @id @default(uuid()) @db.Uuid
+  emailId      String?  @map("email_id") @db.Uuid
+  uploadedById String   @map("uploaded_by_id") @db.Uuid
+  /// Display name only — never used as a path.
+  fileName     String   @map("file_name") @db.VarChar(255)
+  mimeType     String   @map("mime_type") @db.VarChar(127)
+  size         Int
+  content      Bytes
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  email      EmailLog? @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  uploadedBy User      @relation("EmailAttachmentsUploaded", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  @@index([emailId])
+  /// Finds a user's unclaimed uploads, to sweep abandoned ones.
+  @@index([uploadedById, emailId, createdAt])
+  @@map("email_attachments")
 }
 
 /// Singleton row holding the organisation's outgoing-mail account, so it can be

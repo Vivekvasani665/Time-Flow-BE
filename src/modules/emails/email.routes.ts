@@ -1,27 +1,29 @@
 import { Router, type Request, type Response } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { skipTake } from '../../common/http/pagination';
 import { buildMeta, created, ok, paginated } from '../../common/http/response';
-import { producers } from '../../queue/producers';
 import { getQueues } from '../../queue/queues';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../common/errors/app-error';
 import { authenticate, requirePermission } from '../../common/middleware/authenticate';
 import { rateLimit } from '../../common/middleware/rate-limit';
 import { env } from '../../config/env';
 import { requireAuth } from '../../common/utils/request-context';
-import { emailSchema, uuidParam } from '../../common/utils/validation';
+import { uuidParam } from '../../common/utils/validation';
 import { P } from '../permissions/permission-catalog';
+import { composeSchema, draftUpdateSchema, emailService, MAX_ATTACHMENT_BYTES } from './email.service';
 
 /**
  * Mailbox. Folders are derived from who a message belongs to:
- *   inbox — you are the recipient      (toUserId; includes replies to your
- *           mail that arrived from outside, which are INBOUND rows)
- *   sent  — your action triggered it   (fromUserId)
- *   all   — everything (needs emails.view_all)
+ *   inbox  — you are the recipient      (toUserId; includes replies to your
+ *            mail that arrived from outside, which are INBOUND rows)
+ *   sent   — your action triggered it   (fromUserId)
+ *   drafts — composed but not sent yet  (fromUserId, status DRAFT)
+ *   all    — everything sent (needs emails.view_all; never anyone's drafts)
  */
-const boxSchema = z.enum(['inbox', 'sent', 'all']).default('inbox');
+const boxSchema = z.enum(['inbox', 'sent', 'drafts', 'all']).default('inbox');
 
 const listQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -42,24 +44,6 @@ const listQuery = z.object({
 
 const readBody = z.object({ read: z.boolean().default(true) });
 
-/**
- * Recipient is either a team member (lands in their in-app Inbox) or any
- * address at all (goes out over SMTP only) — exactly one of the two.
- */
-const composeSchema = z
-  .object({
-    toUserId: z.uuid({ message: 'Pick a recipient' }).optional(),
-    toEmail: emailSchema.optional(),
-    subject: z.string().trim().min(1, 'Subject is required').max(200),
-    body: z.string().trim().min(1, 'Message is required').max(5000),
-    /** Threads this message under one the sender is a party to. */
-    replyToId: z.uuid().optional(),
-  })
-  .refine((d) => Boolean(d.toUserId) !== Boolean(d.toEmail), {
-    message: 'Give either a team member or an email address',
-    path: ['toUserId'],
-  });
-
 /** Recipient / sender identity shown in the mail header. */
 const userPreview = { select: { id: true, firstName: true, lastName: true, email: true, avatarUrl: true } } as const;
 
@@ -67,6 +51,7 @@ const userPreview = { select: { id: true, firstName: true, lastName: true, email
 const listSelect = {
   id: true,
   to: true,
+  cc: true,
   fromAddress: true,
   fromName: true,
   direction: true,
@@ -80,7 +65,13 @@ const listSelect = {
   createdAt: true,
   toUser: userPreview,
   fromUser: userPreview,
+  _count: { select: { attachments: true } },
 } satisfies Prisma.EmailLogSelect;
+
+const attachmentMeta = { select: { id: true, fileName: true, mimeType: true, size: true }, orderBy: { createdAt: 'asc' } } as const;
+
+/** A draft is private to its author — even the `all` audit view leaves it out. */
+const notDraft: Prisma.EmailLogWhereInput = { status: { not: 'DRAFT' } };
 
 /**
  * Scopes a query to the requested folder, rejecting `all` without the
@@ -88,18 +79,23 @@ const listSelect = {
  * party still has theirs.
  */
 function boxFilter(box: z.infer<typeof boxSchema>, userId: string, canViewAll: boolean): Prisma.EmailLogWhereInput {
-  if (box === 'all') {
-    // The audit view: it deliberately still shows mail either side has hidden.
-    if (!canViewAll) throw new ForbiddenError();
-    return {};
+  switch (box) {
+    case 'all':
+      // The audit view: it deliberately still shows mail either side has hidden.
+      if (!canViewAll) throw new ForbiddenError();
+      return notDraft;
+    case 'drafts':
+      return { fromUserId: userId, status: 'DRAFT' };
+    case 'sent':
+      return { fromUserId: userId, deletedByFromAt: null, ...notDraft };
+    case 'inbox':
+      return { toUserId: userId, deletedByToAt: null, ...notDraft };
   }
-  return box === 'sent'
-    ? { fromUserId: userId, deletedByFromAt: null }
-    : { toUserId: userId, deletedByToAt: null };
 }
 
 /** Everything the caller has not deleted, in either direction. */
 const ownVisible = (userId: string): Prisma.EmailLogWhereInput => ({
+  ...notDraft,
   OR: [
     { toUserId: userId, deletedByToAt: null },
     { fromUserId: userId, deletedByFromAt: null },
@@ -129,24 +125,26 @@ emailRouter.get('/stats', async (req: Request, res: Response) => {
   const auth = requireAuth(req);
   const canViewAll = auth.permissions.has(P['emails.view_all']);
   // Admins watch the whole system; everyone else only their own mail.
-  const scope: Prisma.EmailLogWhereInput = canViewAll ? {} : ownVisible(auth.id);
+  const scope: Prisma.EmailLogWhereInput = canViewAll ? notDraft : ownVisible(auth.id);
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [total, queued, sent, failed, unread, last24h] = await prisma.$transaction([
+  const [total, queued, sent, failed, unread, last24h, drafts] = await prisma.$transaction([
     prisma.emailLog.count({ where: scope }),
     prisma.emailLog.count({ where: { ...scope, status: 'QUEUED' } }),
     prisma.emailLog.count({ where: { ...scope, status: 'SENT' } }),
     prisma.emailLog.count({ where: { ...scope, status: 'FAILED' } }),
     prisma.emailLog.count({ where: { toUserId: auth.id, readAt: null, deletedByToAt: null } }),
     prisma.emailLog.count({ where: { ...scope, createdAt: { gte: since } } }),
+    // Always the caller's own: nobody else's drafts are counted.
+    prisma.emailLog.count({ where: { fromUserId: auth.id, status: 'DRAFT' } }),
   ]);
 
-  return ok(res, { total, queued, sent, failed, unread, last24h, scope: canViewAll ? 'all' : 'own' });
+  return ok(res, { total, queued, sent, failed, unread, last24h, drafts, scope: canViewAll ? 'all' : 'own' });
 });
 
-emailRouter.get('/', async (req: Request, res: Response) => {
+async function listBox(req: Request, res: Response, box?: z.infer<typeof boxSchema>) {
   const auth = requireAuth(req);
-  const q = listQuery.parse(req.query);
+  const q = listQuery.parse(box ? { ...req.query, box } : req.query);
   const where: Prisma.EmailLogWhereInput = {
     ...boxFilter(q.box, auth.id, auth.permissions.has(P['emails.view_all'])),
     ...(q.status ? { status: q.status } : {}),
@@ -168,72 +166,56 @@ emailRouter.get('/', async (req: Request, res: Response) => {
     prisma.emailLog.count({ where }),
   ]);
   return paginated(res, items, buildMeta(q.page, q.limit, total));
-});
+}
+
+emailRouter.get('/', (req: Request, res: Response) => listBox(req, res));
+/** Folder shortcuts: the same as `GET /?box=…`. */
+emailRouter.get('/inbox', (req: Request, res: Response) => listBox(req, res, 'inbox'));
+emailRouter.get('/sent', (req: Request, res: Response) => listBox(req, res, 'sent'));
+emailRouter.get('/drafts', (req: Request, res: Response) => listBox(req, res, 'drafts'));
 
 /**
- * Compose. A recipient that resolves to an active team member also lands in
- * their Inbox; any other address is SMTP-only and sends from the organisation's
- * own identity, so it needs `emails.send_external` on top of `emails.send`.
+ * Compose. Sends at once, or with `draft: true` saves to Drafts. A recipient
+ * that is an active team member also lands in their Inbox; any other address
+ * is delivered by the mail provider only and sends from the organisation's own
+ * identity, so it needs `emails.send_external` on top of `emails.send`.
  */
 emailRouter.post('/', requirePermission(P['emails.send']), composeLimiter, async (req: Request, res: Response) => {
   const auth = requireAuth(req);
   const input = composeSchema.parse(req.body);
+  const result = await emailService.compose(auth, input);
+  return created(res, result, input.draft ? 'Draft saved' : 'Message sent');
+});
 
-  // Match against every account, not just active ones: an address belonging to
-  // an offboarded colleague must be refused, not quietly treated as a stranger.
-  const match = await prisma.user.findFirst({
-    where: input.toUserId ? { id: input.toUserId } : { email: input.toEmail },
-    select: { id: true, email: true, status: true, deletedAt: true },
-  });
-  const usable = match && !match.deletedAt && match.status === 'ACTIVE';
+/**
+ * Upload a file to attach, as multipart field `file`. Returns an id to pass in
+ * `attachmentIds` when composing or saving a draft. Held in memory, then in
+ * the database: the worker that sends the mail does not share this disk.
+ */
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1, fields: 0 },
+  // Browsers send the filename as UTF-8; multer's default would mangle "Résumé.pdf".
+  defParamCharset: 'utf8',
+});
 
-  // A reply may only be threaded under a message the sender is a party to —
-  // otherwise any id would let someone attach mail to a stranger's thread.
-  const parent = input.replyToId
-    ? await prisma.emailLog.findUnique({
-        where: { id: input.replyToId },
-        select: { toUserId: true, fromUserId: true, direction: true, fromAddress: true },
-      })
-    : null;
-  if (input.replyToId) {
-    if (!parent) throw new NotFoundError('Message being replied to');
-    if (parent.toUserId !== auth.id && parent.fromUserId !== auth.id) throw new ForbiddenError();
-  }
-  // Answering someone who wrote to you is not relaying mail to a stranger, so it
-  // does not need `emails.send_external` — but only back to that same address.
-  const answeringInbound =
-    parent?.direction === 'INBOUND' &&
-    parent.toUserId === auth.id &&
-    Boolean(input.toEmail) &&
-    input.toEmail!.toLowerCase() === parent.fromAddress.toLowerCase();
+emailRouter.post(
+  '/attachments',
+  requirePermission(P['emails.send']),
+  composeLimiter,
+  attachmentUpload.single('file'),
+  async (req: Request, res: Response) => {
+    const auth = requireAuth(req);
+    if (!req.file) throw new BadRequestError('No file uploaded', 'VALIDATION_ERROR', [{ path: 'file', message: 'File is required' }]);
+    return created(res, await emailService.storeAttachment(auth, req.file), 'File attached');
+  },
+);
 
-  if (input.toUserId) {
-    if (!usable) throw new NotFoundError('Recipient');
-  } else if (match && !usable) {
-    throw new BadRequestError('That address belongs to a deactivated account.');
-  } else if (!match && !answeringInbound && !auth.permissions.has(P['emails.send_external'])) {
-    // Without this guard any signed-in user could relay arbitrary mail from the
-    // org's sender identity, carrying its SPF/DKIM.
-    throw new ForbiddenError();
-  }
-
-  const to = usable ? { id: match.id, email: match.email } : { id: null, email: input.toEmail! };
-
-  const sender = await prisma.user.findUnique({
-    where: { id: auth.id },
-    select: { firstName: true, lastName: true },
-  });
-  if (!sender) throw new NotFoundError('Sender');
-
-  const log = await producers.userMessage({
-    from: { id: auth.id, name: `${sender.firstName} ${sender.lastName}` },
-    to,
-    subject: input.subject,
-    body: input.body,
-    replyToId: input.replyToId ?? null,
-  });
-
-  return created(res, log, 'Message sent');
+emailRouter.delete('/attachments/:id', requirePermission(P['emails.send']), async (req: Request, res: Response) => {
+  const auth = requireAuth(req);
+  const { id } = uuidParam.parse(req.params);
+  await emailService.removeAttachment(auth, id);
+  return ok(res, null, 'Attachment removed');
 });
 
 /**
@@ -259,11 +241,16 @@ emailRouter.get('/:id', async (req: Request, res: Response) => {
       fromUserId: true,
       replyToId: true,
       replyTo: { select: { id: true, subject: true, createdAt: true } },
+      bcc: true,
+      providerMessageId: true,
+      attachments: attachmentMeta,
       deletedByToAt: true,
       deletedByFromAt: true,
     },
   });
   if (!email) throw new NotFoundError('Email');
+  // A draft is its author's alone; to anyone else it does not exist.
+  if (email.status === 'DRAFT' && email.fromUserId !== auth.id) throw new NotFoundError('Email');
 
   // Deleting hides a message from its owner, so it must stop being fetchable by
   // id too — otherwise a stale link would still open it.
@@ -273,8 +260,58 @@ emailRouter.get('/:id', async (req: Request, res: Response) => {
     if (!auth.permissions.has(P['emails.view_all'])) throw new ForbiddenError();
   }
 
-  const { deletedByToAt, deletedByFromAt, ...view } = email;
-  return ok(res, view);
+  const { deletedByToAt, deletedByFromAt, bcc, ...view } = email;
+  // Bcc is secret from the other recipients by definition — only the sender
+  // (and the audit view) may see who was on it.
+  const showBcc = email.fromUserId === auth.id || auth.permissions.has(P['emails.view_all']);
+  return ok(res, { ...view, bcc: showBcc ? bcc : [] });
+});
+
+/** Download one attachment of a message you can open. */
+emailRouter.get('/:id/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const auth = requireAuth(req);
+  const { id } = uuidParam.parse(req.params);
+  const { id: attachmentId } = uuidParam.parse({ id: req.params.attachmentId });
+  const file = await prisma.emailAttachment.findFirst({
+    where: { id: attachmentId, emailId: id },
+    select: {
+      fileName: true,
+      mimeType: true,
+      content: true,
+      email: { select: { status: true, toUserId: true, fromUserId: true, deletedByToAt: true, deletedByFromAt: true } },
+    },
+  });
+  if (!file?.email) throw new NotFoundError('Attachment');
+  const e = file.email;
+  const asRecipient = e.status !== 'DRAFT' && e.toUserId === auth.id && e.deletedByToAt === null;
+  const asSender = e.fromUserId === auth.id && e.deletedByFromAt === null;
+  const asAuditor = e.status !== 'DRAFT' && auth.permissions.has(P['emails.view_all']);
+  if (!asRecipient && !asSender && !asAuditor) throw new NotFoundError('Attachment');
+
+  // Always a download, never rendered in the API's origin.
+  res.attachment(file.fileName);
+  res.type(file.mimeType);
+  res.setHeader('Cache-Control', 'private, no-store');
+  return res.send(Buffer.from(file.content));
+});
+
+/** Autosave a draft. Only the fields sent change; `attachmentIds` replaces the set. */
+emailRouter.patch('/:id', requirePermission(P['emails.send']), async (req: Request, res: Response) => {
+  const auth = requireAuth(req);
+  const { id } = uuidParam.parse(req.params);
+  const patch = draftUpdateSchema.parse(req.body ?? {});
+  return ok(res, await emailService.updateDraft(auth, id, patch), 'Draft saved');
+});
+
+/**
+ * Send a draft. The body may carry last edits (same fields as PATCH), applied
+ * first. The draft becomes a QUEUED message in Sent; the worker delivers it.
+ */
+emailRouter.post('/:id/send', requirePermission(P['emails.send']), composeLimiter, async (req: Request, res: Response) => {
+  const auth = requireAuth(req);
+  const { id } = uuidParam.parse(req.params);
+  const patch = draftUpdateSchema.parse(req.body ?? {});
+  return ok(res, await emailService.sendDraft(auth, id, patch), 'Message sent');
 });
 
 /** Only the recipient has a read state — a message in Sent is never "unread". */
@@ -306,9 +343,13 @@ emailRouter.delete('/:id', async (req: Request, res: Response) => {
 
   const email = await prisma.emailLog.findUnique({
     where: { id },
-    select: { toUserId: true, fromUserId: true, deletedByToAt: true, deletedByFromAt: true },
+    select: { status: true, toUserId: true, fromUserId: true, deletedByToAt: true, deletedByFromAt: true },
   });
   if (!email) throw new NotFoundError('Email');
+  if (email.status === 'DRAFT') {
+    await emailService.deleteDraft(auth, id);
+    return ok(res, null, 'Draft discarded');
+  }
 
   // `emails.view_all` is a read permission: an admin may see everyone's mail but
   // may not delete a message that is not theirs.

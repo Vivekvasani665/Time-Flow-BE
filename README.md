@@ -38,6 +38,31 @@ npm run dev            # API on http://localhost:4000
 npm run dev:worker     # emails, activity logs, inbox sync
 ```
 
+## Email
+
+The Mailbox (`/api/emails`) sends through a background worker, so the worker must
+be running for mail to leave. Messages support To / Cc / Bcc, drafts
+(`draft: true`, `PATCH /api/emails/:id`, `POST /api/emails/:id/send`) and
+attachments (`POST /api/emails/attachments`, then pass `attachmentIds`). Full
+reference at `/api/docs`.
+
+Pick the delivery provider with `EMAIL_PROVIDER` — switching is config only:
+
+| `EMAIL_PROVIDER` | Needs | Notes |
+| --- | --- | --- |
+| `gmail` | `GMAIL_USER`, `GMAIL_APP_PASSWORD` (16-char App Password) | Replies are pulled back into the Inbox over IMAP |
+| `resend` | `RESEND_API_KEY`, `EMAIL_FROM` | HTTPS — works where SMTP ports are blocked |
+| `sendgrid` | `SENDGRID_API_KEY`, `EMAIL_FROM` | HTTPS |
+| `brevo` | `BREVO_API_KEY`, `EMAIL_FROM` | HTTPS; same key as Brevo SMS |
+| `smtp` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Any other SMTP relay |
+| `mailpit` | — | Local catcher for development |
+| `log` | — | Logs instead of sending |
+
+`EMAIL_FROM` must be a sender or domain verified with the provider, e.g.
+`EMAIL_FROM="TimeFlow <team@yourcompany.com>"`. A Gmail account can also be
+set in the app under System → Email delivery, which takes precedence. Outside
+production, real providers refuse to send unless `EMAIL_ALLOW_REAL_SEND=true`.
+
 ## Production
 
 ```bash

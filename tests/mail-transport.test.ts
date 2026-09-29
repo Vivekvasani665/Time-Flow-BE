@@ -65,6 +65,21 @@ describe('mail transport selection', () => {
     await prisma.$disconnect();
   });
 
+  it('guards an API provider like any other real one, and needs its key', async () => {
+    const withKey = await loadMailer({ EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 're_test', EMAIL_ALLOW_REAL_SEND: 'false' });
+    // No SMTP transport stands behind it, so no IMAP account can be derived either.
+    expect(withKey.resolveEnvTransport()).toMatchObject({ label: 'resend', external: true });
+    await expect(withKey.sendMail({ to: 'customer@example.com', subject: 'Hi', html: '<p>Hi</p>', text: 'Hi' })).rejects.toBeInstanceOf(
+      withKey.BlockedMailError,
+    );
+
+    const noKey = await loadMailer({ EMAIL_PROVIDER: 'sendgrid', SENDGRID_API_KEY: '' });
+    await expect(noKey.verifyTransport()).resolves.toBe(false);
+
+    const { prisma } = await import('../src/lib/prisma');
+    await prisma.$disconnect();
+  });
+
   it('reports the misconfiguration instead of pretending to verify', async () => {
     // A remote host with no credentials passes a socket check and then rejects
     // every send, so verify() must call it a failure.

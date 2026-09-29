@@ -1,7 +1,8 @@
 import { UnrecoverableError, type Job } from 'bullmq';
 import { prisma } from '../../lib/prisma';
 import type { Logger } from '../../lib/logger';
-import { BlockedMailError, sendMail } from '../mailer';
+import { BlockedMailError, deliverMail } from '../mailer';
+import { PermanentMailError } from '../mail-providers';
 import { renderEmail } from '../templates';
 import { getQueues, QUEUE_NAMES } from '../queues';
 import type { EmailJobData } from '../job-types';
@@ -12,7 +13,14 @@ export async function processEmailJob(job: Job<EmailJobData>, log: Logger): Prom
 
   const emailLog = await prisma.emailLog.findUnique({
     where: { id: emailLogId },
-    select: { status: true, replyTo: { select: { messageId: true, inReplyTo: true } } },
+    select: {
+      status: true,
+      cc: true,
+      bcc: true,
+      replyTo: { select: { messageId: true, inReplyTo: true } },
+      // Read here, not carried in the job: Redis would otherwise hold every file.
+      attachments: { select: { fileName: true, mimeType: true, content: true }, orderBy: { createdAt: 'asc' } },
+    },
   });
   if (emailLog?.status === 'SENT') {
     log.info({ jobId: job.id, emailLogId }, 'email already sent; skipping duplicate delivery');
@@ -27,22 +35,29 @@ export async function processEmailJob(job: Job<EmailJobData>, log: Logger): Prom
     // its ids forward, which keeps the conversation threaded in the other
     // person's mail client.
     const parent = emailLog?.replyTo;
-    const messageId = await sendMail(renderEmail(template, to, variables), undefined, {
+    const message = {
+      ...renderEmail(template, to, variables),
+      cc: emailLog?.cc ?? [],
+      bcc: emailLog?.bcc ?? [],
+      attachments: (emailLog?.attachments ?? []).map((a) => ({ filename: a.fileName, contentType: a.mimeType, content: Buffer.from(a.content) })),
+    };
+    const { messageId, providerMessageId } = await deliverMail(message, undefined, {
       messageIdSeed: emailLogId,
       ...(parent?.messageId ? { inReplyTo: parent.messageId } : {}),
       references: [parent?.inReplyTo, parent?.messageId].filter((id): id is string => Boolean(id)),
     });
     await prisma.emailLog.updateMany({
       where: { id: emailLogId },
-      data: { status: 'SENT', sentAt: new Date(), lastError: null, messageId },
+      data: { status: 'SENT', sentAt: new Date(), lastError: null, messageId, providerMessageId },
     });
     return { messageId };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await prisma.emailLog.updateMany({ where: { id: emailLogId }, data: { lastError: message.slice(0, 1000) } });
-    // A blocked send is a configuration decision, not a transient fault —
-    // retrying it four more times would only repeat the same refusal.
-    if (err instanceof BlockedMailError) throw new UnrecoverableError(message);
+    // A blocked send is a configuration decision, and a provider refusing the
+    // request itself (bad key, unverified sender) is not transient either —
+    // retrying four more times would only repeat the same refusal.
+    if (err instanceof BlockedMailError || err instanceof PermanentMailError) throw new UnrecoverableError(message);
     throw err;
   }
 }

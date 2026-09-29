@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
+import { ConflictError } from '../common/errors/app-error';
 import { getQueues } from './queues';
 import { renderEmail } from './templates';
 import type { ActivityJobData, EmailTemplate } from './job-types';
@@ -18,6 +19,12 @@ type EnqueueInput = {
    */
   jobId?: string;
   replyToId?: string | null;
+  cc?: string[];
+  bcc?: string[];
+  /** Uploads to attach. The caller has already checked they belong to the sender. */
+  attachmentIds?: string[];
+  /** Sends this DRAFT row instead of writing a new one. */
+  draftId?: string;
 };
 
 /**
@@ -38,19 +45,37 @@ async function enqueue(input: EnqueueInput): Promise<{ id: string }> {
   }
 
   const rendered = renderEmail(input.template, input.to.email, input.variables);
-  const log = await prisma.emailLog.create({
-    data: {
-      to: input.to.email,
-      fromAddress: env.SMTP_FROM,
-      subject: rendered.subject,
-      template: input.template,
-      bodyHtml: rendered.html,
-      bodyText: rendered.text,
-      toUserId: input.to.id,
-      fromUserId: input.fromUserId ?? null,
-      replyToId: input.replyToId ?? null,
-    },
-    select: { id: true },
+  const data = {
+    to: input.to.email,
+    cc: input.cc ?? [],
+    bcc: input.bcc ?? [],
+    fromAddress: env.SMTP_FROM,
+    subject: rendered.subject,
+    template: input.template,
+    bodyHtml: rendered.html,
+    bodyText: rendered.text,
+    toUserId: input.to.id,
+    fromUserId: input.fromUserId ?? null,
+    replyToId: input.replyToId ?? null,
+  };
+  const log = await prisma.$transaction(async (tx) => {
+    let row: { id: string };
+    if (input.draftId) {
+      // Guarded on DRAFT so two concurrent "Send" clicks cannot both queue it.
+      // createdAt moves to now so Sent orders by when it went, not when drafted.
+      const { count } = await tx.emailLog.updateMany({
+        where: { id: input.draftId, status: 'DRAFT' },
+        data: { ...data, status: 'QUEUED', createdAt: new Date() },
+      });
+      if (count === 0) throw new ConflictError('This draft has already been sent');
+      row = { id: input.draftId };
+    } else {
+      row = await tx.emailLog.create({ data, select: { id: true } });
+    }
+    if (input.attachmentIds?.length) {
+      await tx.emailAttachment.updateMany({ where: { id: { in: input.attachmentIds } }, data: { emailId: row.id } });
+    }
+    return row;
   });
 
   let job;
@@ -118,12 +143,21 @@ export const producers = {
     body: string;
     /** Set when composed as a reply, to thread it under the original. */
     replyToId?: string | null;
+    cc?: string[];
+    bcc?: string[];
+    attachmentIds?: string[];
+    /** Sends this saved draft rather than creating a new message. */
+    draftId?: string;
   }): Promise<{ id: string }> {
     return enqueue({
       template: 'message',
       to: input.to,
       fromUserId: input.from.id,
       replyToId: input.replyToId ?? null,
+      cc: input.cc ?? [],
+      bcc: input.bcc ?? [],
+      attachmentIds: input.attachmentIds ?? [],
+      ...(input.draftId ? { draftId: input.draftId } : {}),
       variables: { senderName: input.from.name, subject: input.subject, body: input.body },
     });
   },

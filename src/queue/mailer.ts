@@ -2,8 +2,26 @@ import nodemailer, { type Transporter } from 'nodemailer';
 import { env, isProd } from '../config/env';
 import { logger } from '../lib/logger';
 import { mailSettingsService } from '../modules/emails/mail-settings.service';
+import {
+  BrevoProvider,
+  ResendProvider,
+  SendGridProvider,
+  SmtpProvider,
+  type MailAttachment,
+  type MailProvider,
+  type SendResult,
+} from './mail-providers';
 
-export type MailMessage = { to: string; subject: string; html: string; text: string };
+export type MailMessage = {
+  /** One address, or several joined with commas. */
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  cc?: string[];
+  bcc?: string[];
+  attachments?: MailAttachment[];
+};
 
 /** Threading headers, so a reply can be matched to — and shown under — its original. */
 export type MailHeaders = {
@@ -17,14 +35,6 @@ export type MailHeaders = {
 export function buildMessageId(seed: string, from: string): string {
   const domain = /@([^>\s]+)>?\s*$/.exec(from)?.[1] ?? 'timeflow.local';
   return `<${seed}@${domain}>`;
-}
-
-function headerOptions(from: string, headers: MailHeaders) {
-  return {
-    ...(headers.messageIdSeed ? { messageId: buildMessageId(headers.messageIdSeed, from) } : {}),
-    ...(headers.inReplyTo ? { inReplyTo: headers.inReplyTo } : {}),
-    ...(headers.references?.length ? { references: headers.references } : {}),
-  };
 }
 
 export class SimulatedMailFailure extends Error {
@@ -95,6 +105,13 @@ export function resolveEnvTransport(): EnvTransport {
       };
     }
 
+    // Sent over HTTPS by an API provider (see resolveApiProvider); there is no
+    // SMTP transport, and so no IMAP account to read replies from either.
+    case 'resend':
+    case 'sendgrid':
+    case 'brevo':
+      return { label: provider, from: env.SMTP_FROM, external: true, options: { jsonTransport: true } };
+
     case 'smtp':
     default:
       return {
@@ -109,6 +126,33 @@ export function resolveEnvTransport(): EnvTransport {
         },
       };
   }
+}
+
+const API_KEYS = {
+  resend: () => env.RESEND_API_KEY,
+  sendgrid: () => env.SENDGRID_API_KEY,
+  brevo: () => env.BREVO_API_KEY,
+} as const;
+
+type ApiProviderName = keyof typeof API_KEYS;
+
+const isApiProvider = (name: string | undefined): name is ApiProviderName => Boolean(name && name in API_KEYS);
+
+let apiProvider: MailProvider | null = null;
+
+/**
+ * The HTTPS provider EMAIL_PROVIDER names, or null when it names an SMTP one.
+ * Throws when the API key is missing — every send would be rejected anyway.
+ */
+function resolveApiProvider(): MailProvider | null {
+  const name = env.EMAIL_PROVIDER;
+  if (!isApiProvider(name)) return null;
+  if (apiProvider?.name === name) return apiProvider;
+  const key = API_KEYS[name]();
+  if (!key) throw new BlockedMailError(`EMAIL_PROVIDER=${name} but ${name.toUpperCase()}_API_KEY is not set.`);
+  apiProvider = name === 'resend' ? new ResendProvider(key) : name === 'sendgrid' ? new SendGridProvider(key) : new BrevoProvider(key);
+  logger.info({ provider: name }, 'mail provider ready');
+  return apiProvider;
 }
 
 /**
@@ -168,6 +212,22 @@ function getTransporter(resolved: EnvTransport): Transporter {
  */
 export async function verifyTransport(): Promise<boolean> {
   const configured = await getConfiguredTransport();
+  // An account configured in the app wins, so only check the API provider without one.
+  if (!configured && isApiProvider(env.EMAIL_PROVIDER)) {
+    // There is no free "verify" call on these APIs, so this checks configuration only.
+    const name = env.EMAIL_PROVIDER;
+    if (!API_KEYS[name]()) {
+      logger.error({ provider: name }, `mail provider misconfigured — set ${name.toUpperCase()}_API_KEY, or no mail will be delivered`);
+      return false;
+    }
+    const blocked = blockedReason(resolveEnvTransport());
+    if (blocked) {
+      logger.warn({ provider: name, nodeEnv: env.NODE_ENV }, blocked);
+      return false;
+    }
+    logger.info({ provider: name, from: env.SMTP_FROM }, 'mail provider configured (API key set; the sender must be verified with the provider)');
+    return true;
+  }
   if (configured) {
     try {
       await configured.transport.verify();
@@ -241,33 +301,65 @@ export async function verifyTransport(): Promise<boolean> {
 
 export type MailerOptions = { failureRate?: number; random?: () => number };
 
-export async function sendMail(message: MailMessage, options: MailerOptions = {}, headers: MailHeaders = {}): Promise<string> {
+/** Splits a To line on commas that are not inside a quoted display name. */
+function splitAddresses(value: string): string[] {
+  return (value.match(/(?:"[^"]*"|[^,])+/g) ?? []).map((a) => a.trim()).filter(Boolean);
+}
+
+/**
+ * Delivers one message through whichever provider is active: an account
+ * configured in the app, then EMAIL_PROVIDER's API provider, then the SMTP_*
+ * environment. Returns both the Message-ID and the provider's own id.
+ */
+export async function deliverMail(message: MailMessage, options: MailerOptions = {}, headers: MailHeaders = {}): Promise<SendResult> {
   const failureRate = options.failureRate ?? env.EMAIL_FAILURE_RATE;
   const random = options.random ?? Math.random;
 
-  // An account configured in the UI wins over the SMTP_* env vars.
+  // An account configured in the UI wins over the environment.
   const configured = await getConfiguredTransport();
 
   // Demo hooks for retry / backoff / dead-letter behaviour. Kept out of
   // production: a real recipient using a plus-address such as
   // alice+failover@example.com would otherwise be undeliverable.
-  if (!isProd && message.to.includes('+fail')) throw new SimulatedMailFailure(`SMTP rejected recipient ${message.to} (simulated)`);
+  const everyone = [message.to, ...(message.cc ?? []), ...(message.bcc ?? [])].join(',');
+  if (!isProd && everyone.includes('+fail')) throw new SimulatedMailFailure(`SMTP rejected recipient ${message.to} (simulated)`);
   if (failureRate > 0 && random() < failureRate) throw new SimulatedMailFailure('SMTP connection reset (simulated)');
 
+  let provider: MailProvider;
+  let from: string;
   if (configured) {
     // A UI-configured account is always a real provider, so it is subject to
     // the same non-production guard as EMAIL_PROVIDER=gmail.
     const blocked = blockedReason({ label: 'app settings', from: configured.from, external: true, options: {} });
     if (blocked) throw new BlockedMailError(blocked);
-    const info = await configured.transport.sendMail({ from: configured.from, ...message, ...headerOptions(configured.from, headers) });
-    return String(info.messageId);
+    provider = new SmtpProvider('app settings', configured.transport);
+    from = configured.from;
+  } else {
+    const resolved = resolveEnvTransport();
+    const blocked = blockedReason(resolved);
+    if (blocked) throw new BlockedMailError(blocked);
+    provider = resolveApiProvider() ?? new SmtpProvider(resolved.label, getTransporter(resolved));
+    from = resolved.from;
   }
 
-  const resolved = resolveEnvTransport();
-  const blocked = blockedReason(resolved);
-  if (blocked) throw new BlockedMailError(blocked);
+  const result = await provider.sendEmail({
+    from,
+    to: splitAddresses(message.to),
+    cc: message.cc ?? [],
+    bcc: message.bcc ?? [],
+    subject: message.subject,
+    html: message.html,
+    text: message.text,
+    attachments: message.attachments ?? [],
+    ...(headers.messageIdSeed ? { messageId: buildMessageId(headers.messageIdSeed, from) } : {}),
+    ...(headers.inReplyTo ? { inReplyTo: headers.inReplyTo } : {}),
+    ...(headers.references?.length ? { references: headers.references } : {}),
+  });
+  if (provider.name === 'log-only') logger.info({ to: message.to, subject: message.subject }, 'email logged (no mail provider configured)');
+  return result;
+}
 
-  const info = await getTransporter(resolved).sendMail({ from: resolved.from, ...message, ...headerOptions(resolved.from, headers) });
-  if (resolved.label === 'log-only') logger.info({ to: message.to, subject: message.subject }, 'email logged (no mail provider configured)');
-  return String(info.messageId);
+/** `deliverMail`, for callers that only need the Message-ID. */
+export async function sendMail(message: MailMessage, options: MailerOptions = {}, headers: MailHeaders = {}): Promise<string> {
+  return (await deliverMail(message, options, headers)).messageId;
 }
