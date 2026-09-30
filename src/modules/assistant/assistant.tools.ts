@@ -1,5 +1,4 @@
-import { betaZodTool } from '@anthropic-ai/sdk/helpers/beta/zod';
-import { z } from 'zod';
+import { z, type ZodType } from 'zod';
 import { fullName } from '../../common/utils/request-context';
 import type { AuthContext } from '../auth/auth.types';
 import { can } from '../permissions/rbac.service';
@@ -17,6 +16,23 @@ export const TOOL_STATUS: Record<string, string> = {
   get_overview: 'Checking your dashboard…',
 };
 
+/** A read-only lookup the assistant can call. Provider-neutral: the service turns it into the model API's tool format. */
+export type AssistantTool = {
+  name: string;
+  description: string;
+  inputSchema: ZodType<Record<string, unknown>>;
+  run: (input: never) => Promise<string>;
+};
+
+function tool<S extends ZodType<Record<string, unknown>>>(def: {
+  name: string;
+  description: string;
+  inputSchema: S;
+  run: (input: z.infer<S>) => Promise<string>;
+}): AssistantTool {
+  return def as AssistantTool;
+}
+
 const today = () => new Date().toISOString().slice(0, 10);
 const day = (d: Date | string | null) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
@@ -25,10 +41,10 @@ const day = (d: Date | string | null) => (d ? new Date(d).toISOString().slice(0,
  * services (and so the same permission checks and row scoping) as the REST
  * API. The assistant can never see more than the user could open themselves.
  */
-export function assistantTools(actor: AuthContext) {
+export function assistantTools(actor: AuthContext): AssistantTool[] {
   const noAccess = (what: string) => JSON.stringify({ error: `You don't have permission to view ${what}.` });
 
-  const listTasks = betaZodTool({
+  const listTasks = tool({
     name: 'list_tasks',
     description:
       'List tasks the user can see. Use mine=true for "my tasks" (assigned to the user). Returns title, status, priority, due date, project, assignee and whether it is overdue.',
@@ -76,7 +92,7 @@ export function assistantTools(actor: AuthContext) {
     },
   });
 
-  const listProjects = betaZodTool({
+  const listProjects = tool({
     name: 'list_projects',
     description: 'List projects the user can see, with status, priority, dates, manager, member count and task progress.',
     inputSchema: z.object({
@@ -109,7 +125,7 @@ export function assistantTools(actor: AuthContext) {
     },
   });
 
-  const getOverview = betaZodTool({
+  const getOverview = tool({
     name: 'get_overview',
     description: "The user's dashboard numbers: project and task counts, tasks by status, and projects by status.",
     inputSchema: z.object({}),
@@ -119,6 +135,5 @@ export function assistantTools(actor: AuthContext) {
     },
   });
 
-  // Inputs stream as they're generated; betaZodTool validates each one against its schema before `run`.
-  return [listTasks, listProjects, getOverview].map((tool) => ({ ...tool, eager_input_streaming: true }));
+  return [listTasks, listProjects, getOverview];
 }

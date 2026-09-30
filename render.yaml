@@ -49,7 +49,7 @@ services:
       - key: APP_URL
         sync: false
       # TimeFlow Assistant (the AI bot in Chat). Optional; asked for when the Blueprint is created.
-      - key: ANTHROPIC_API_KEY
+      - key: GROQ_API_KEY
         sync: false
       # Free instances cannot open outbound SMTP ports, so mail is logged
       # rather than sent. On a paid plan set this to gmail and fill in
