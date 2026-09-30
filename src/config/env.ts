@@ -112,6 +112,16 @@ const EnvSchema = z.object({
   RATE_LIMIT_CHAT_WINDOW_SECONDS: z.coerce.number().int().positive().default(10),
 
   /**
+   * TimeFlow Assistant (the bot in Chat) calls Claude with this key. Optional:
+   * without it the assistant reports that it isn't set up and nothing else changes.
+   */
+  ANTHROPIC_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  ASSISTANT_MODEL: z.string().min(1).default('claude-opus-5-5'),
+  /** Assistant questions per user. Each one is a paid model call, so the budget is tight. */
+  RATE_LIMIT_ASSISTANT_MAX: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_ASSISTANT_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+
+  /**
    * Chooses the outgoing transport explicitly, so moving between environments
    * is a config change rather than a code change:
    *   mailpit — local catcher, no auth (development)
