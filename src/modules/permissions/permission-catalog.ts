@@ -45,6 +45,9 @@ export const PERMISSION_CATALOG = {
     view: 'View background queues and email log',
     manage: 'Retry failed background jobs',
   },
+  chat: {
+    moderate: 'Delete any chat message',
+  },
 } as const;
 
 type Catalog = typeof PERMISSION_CATALOG;

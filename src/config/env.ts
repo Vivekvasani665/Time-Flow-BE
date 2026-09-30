@@ -107,6 +107,22 @@ const EnvSchema = z.object({
    *  a far tighter budget than a read — and counted per user, not per IP. */
   RATE_LIMIT_EMAIL_MAX: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_EMAIL_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+  /** Chat messages per user, shared by the REST endpoint and the socket. */
+  RATE_LIMIT_CHAT_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_CHAT_WINDOW_SECONDS: z.coerce.number().int().positive().default(10),
+
+  /**
+   * TimeFlow Assistant (the bot in Chat) calls Groq with this key. Optional:
+   * without it the assistant reports that it isn't set up and nothing else changes.
+   */
+  GROQ_API_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** A Groq model that supports tool calling. */
+  ASSISTANT_MODEL: z.string().min(1).default('openai/gpt-oss-120b'),
+  /** A Groq model that reads images and supports tool calling; used for turns with attached pictures. */
+  ASSISTANT_VISION_MODEL: z.string().min(1).default('qwen/qwen3.8-27b'),
+  /** Assistant questions per user. Each one is a paid model call, so the budget is tight. */
+  RATE_LIMIT_ASSISTANT_MAX: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_ASSISTANT_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
 
   /**
    * Chooses the outgoing transport explicitly, so moving between environments

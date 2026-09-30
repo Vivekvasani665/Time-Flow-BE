@@ -30,6 +30,14 @@ export function paginated<T>(
   return res.status(200).json(body);
 }
 
+export type CursorMeta = { limit: number; hasMore: boolean; nextCursor: string | null };
+
+/** For feeds paged by cursor (e.g. chat), where a total count is neither needed nor cheap. */
+export function cursorPaginated<T>(res: Response, data: T[], meta: CursorMeta): Response {
+  const body: SuccessBody<T[]> = { success: true, data, meta };
+  return res.status(200).json(body);
+}
+
 export function buildMeta(page: number, limit: number, total: number): PaginationMeta {
   return { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) };
 }
