@@ -92,7 +92,6 @@ model User {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
 
-<<<<<<< HEAD
   role             Role                    @relation(fields: [roleId], references: [id], onDelete: Restrict)
   managedProjects  Project[]               @relation("ProjectManager")
   createdProjects  Project[]               @relation("ProjectCreator")
@@ -113,30 +112,9 @@ model User {
   requestedResets  PasswordResetRequest[]  @relation("PasswordResetRequester")
   sentInvitations  UserInvitation[]        @relation("InvitationSender")
   invitation       UserInvitation?         @relation("InvitationAcceptedUser")
-=======
-  role            Role                    @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  managedProjects Project[]               @relation("ProjectManager")
-  createdProjects Project[]               @relation("ProjectCreator")
-  memberships     ProjectMember[]
-  assignedTasks   Task[]                  @relation("TaskAssignee")
-  createdTasks    Task[]                  @relation("TaskCreator")
-  activityLogs    ActivityLog[]
-  notifications   Notification[]
-  refreshTokens   RefreshToken[]
-  recoveryCodes   TwoFactorRecoveryCode[]
-  passkeys        WebAuthnCredential[]
-  loginOtps       LoginOtp[]
-  signupOtps      SignupOtp[]
-  emailsReceived  EmailLog[]              @relation("EmailsReceived")
-  emailsSent      EmailLog[]              @relation("EmailsSent")
-  passwordResets  PasswordResetRequest[]  @relation("PasswordResetTarget")
-  requestedResets PasswordResetRequest[]  @relation("PasswordResetRequester")
-  sentInvitations UserInvitation[]        @relation("InvitationSender")
-  invitation      UserInvitation?         @relation("InvitationAcceptedUser")
-  chatMessages    ChatMessage[]
-  chatReactions   ChatMessageReaction[]
-  chatReadState   ChatReadState?
->>>>>>> dev
+  chatMessages     ChatMessage[]
+  chatReactions    ChatMessageReaction[]
+  chatReadState    ChatReadState?
 
   @@index([roleId])
   @@index([status, deletedAt])
