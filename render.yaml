@@ -51,6 +51,12 @@ services:
       # TimeFlow Assistant (the AI bot in Chat). Optional; asked for when the Blueprint is created.
       - key: GROQ_API_KEY
         sync: false
+      # Voice/video calls. STUN works out of the box; add a TURN relay for
+      # callers behind strict firewalls or mobile networks (see README).
+      - key: CALL_TURN_URLS
+        sync: false
+      - key: CALL_TURN_SECRET
+        sync: false
       # Free instances cannot open outbound SMTP ports, so mail is logged
       # rather than sent. To deliver on the free plan use an HTTPS provider:
       # resend / sendgrid / brevo plus its API key and EMAIL_FROM (a verified

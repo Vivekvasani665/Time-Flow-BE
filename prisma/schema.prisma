@@ -115,6 +115,8 @@ model User {
   chatMessages     ChatMessage[]
   chatReactions    ChatMessageReaction[]
   chatReadState    ChatReadState?
+  callsMade        Call[]                  @relation("CallCaller")
+  callsReceived    Call[]                  @relation("CallReceiver")
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -318,6 +320,56 @@ model ChatReadState {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("chat_read_states")
+}
+
+enum CallType {
+  VOICE
+  VIDEO
+}
+
+/// Where a call stands. RINGING → ACCEPTED (media negotiating) → CONNECTED →
+/// ENDED, or it stops early as REJECTED, MISSED (no answer, cancelled, busy or
+/// offline) or FAILED (media never connected or dropped).
+enum CallStatus {
+  RINGING
+  ACCEPTED
+  CONNECTED
+  REJECTED
+  MISSED
+  ENDED
+  FAILED
+}
+
+/// A 1-to-1 voice or video call. Only signaling and history go through the
+/// server; audio and video travel peer to peer (WebRTC) and are never stored.
+model Call {
+  id               String     @id @default(uuid()) @db.Uuid
+  callerId         String     @map("caller_id") @db.Uuid
+  receiverId       String     @map("receiver_id") @db.Uuid
+  type             CallType
+  status           CallStatus @default(RINGING)
+  /// Transient: the one browser tab on each side that is in the call, so
+  /// offers, answers and ICE candidates reach that tab and no other.
+  callerSocketId   String?    @map("caller_socket_id") @db.VarChar(64)
+  receiverSocketId String?    @map("receiver_socket_id") @db.VarChar(64)
+  startedAt        DateTime   @default(now()) @map("started_at") @db.Timestamptz(3)
+  answeredAt       DateTime?  @map("answered_at") @db.Timestamptz(3)
+  connectedAt      DateTime?  @map("connected_at") @db.Timestamptz(3)
+  endedAt          DateTime?  @map("ended_at") @db.Timestamptz(3)
+  /// Seconds from connecting to hanging up; 0 for a call that never connected.
+  durationSeconds  Int?       @map("duration_seconds")
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  caller   User @relation("CallCaller", fields: [callerId], references: [id], onDelete: Cascade)
+  receiver User @relation("CallReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  /// "Is this user already in a call?" — checked on every call start and answer.
+  @@index([callerId, status])
+  @@index([receiverId, status])
+  /// History between two people, newest first (queried in both directions).
+  @@index([callerId, receiverId, createdAt(sort: Desc)])
+  @@map("calls")
 }
 
 /// A passkey (WebAuthn credential) used as a second factor: Face ID, Touch ID,

@@ -10,6 +10,7 @@ import { UnauthorizedError } from '../../common/errors';
 import { normalizeError } from '../../common/middleware/error-handler';
 import { ACCESS_COOKIE, tokenService } from '../auth/token.service';
 import type { AuthContext } from '../auth/auth.types';
+import { registerCallHandlers } from '../calls/call.socket';
 import { rbacService } from '../permissions/rbac.service';
 import { chatRealtime, GLOBAL_CHAT_ROOM, userRoom, type ChatSocketData } from './chat.realtime';
 import { chatUserSelect } from './chat.repository';
@@ -121,6 +122,9 @@ function registerHandlers(io: ChatServer, socket: ChatSocket) {
   handle(socket, 'chat:reaction:remove', socketReactionSchema, (actor, { messageId, emoji }) =>
     chatService.removeReaction(actor, messageId, emoji),
   );
+
+  // Voice and video call signaling rides the same authenticated connection.
+  registerCallHandlers(socket, user.id, (event, schema, run) => handle(socket, event, schema, run));
 
   // Typing carries no data and is never stored, so it skips re-authorisation;
   // the socket was authenticated at connect and is dropped when the token lapses.

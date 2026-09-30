@@ -37,6 +37,28 @@ export const chatRealtime = {
     io?.to(userRoom(userId)).emit(event, payload);
   },
 
+  /** Every tab of a user except one (e.g. the tab that answered a call). */
+  toUserExcept(userId: string, socketId: string, event: string, payload: unknown): void {
+    io?.to(userRoom(userId)).except(socketId).emit(event, payload);
+  },
+
+  /** One connection (one browser tab), on whichever replica holds it. */
+  toSocket(socketId: string, event: string, payload: unknown): void {
+    io?.to(socketId).emit(event, payload);
+  },
+
+  /** Whether a connection is still open, on any replica. */
+  async isSocketConnected(socketId: string): Promise<boolean> {
+    if (!io) return false;
+    return (await io.in(socketId).fetchSockets()).length > 0;
+  },
+
+  /** Whether a user has at least one open connection, on any replica. */
+  async isUserOnline(userId: string): Promise<boolean> {
+    if (!io) return false;
+    return (await io.in(userRoom(userId)).fetchSockets()).length > 0;
+  },
+
   /** Distinct users with at least one open connection, across all replicas. */
   async onlineUsers(): Promise<ChatUser[]> {
     if (!io) return [];

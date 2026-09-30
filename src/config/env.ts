@@ -5,6 +5,18 @@ const bool = z
   .enum(['true', 'false', '1', '0'])
   .transform((v) => v === 'true' || v === '1');
 
+/** A comma-separated list, e.g. "a, b,c" → ["a", "b", "c"]. */
+const list = (fallback: string) =>
+  z
+    .string()
+    .default(fallback)
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -123,6 +135,32 @@ const EnvSchema = z.object({
   /** Assistant questions per user. Each one is a paid model call, so the budget is tight. */
   RATE_LIMIT_ASSISTANT_MAX: z.coerce.number().int().positive().default(20),
   RATE_LIMIT_ASSISTANT_WINDOW_SECONDS: z.coerce.number().int().positive().default(300),
+
+  /**
+   * Voice and video calls (Chat). Media goes peer to peer; these are the ICE
+   * servers browsers use to find each other. STUN is enough on most networks;
+   * a TURN relay is needed behind strict NATs and corporate firewalls.
+   * Comma-separated URLs, e.g. "stun:stun.l.google.com:19302".
+   */
+  CALL_STUN_URLS: list('stun:stun.l.google.com:19302'),
+  /** e.g. "turn:turn.example.com:3478,turns:turn.example.com:5349". Empty: no relay. */
+  CALL_TURN_URLS: list(''),
+  /**
+   * coturn `use-auth-secret` (recommended): each user gets a short-lived
+   * username/password derived from this secret, so nothing long-lived reaches
+   * the browser. Takes precedence over the static pair below.
+   */
+  CALL_TURN_SECRET: z.string().optional().transform((v) => (v ? v : undefined)),
+  CALL_TURN_TTL_SECONDS: z.coerce.number().int().min(300).default(6 * 3600),
+  /** Static TURN credentials (e.g. a hosted TURN plan without a shared secret). */
+  CALL_TURN_USERNAME: z.string().optional().transform((v) => (v ? v : undefined)),
+  CALL_TURN_CREDENTIAL: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** How long a call rings before it counts as missed. */
+  CALL_RING_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(120).default(45),
+  /** How long a participant may be disconnected (e.g. reconnecting) before the call ends. */
+  CALL_RECONNECT_GRACE_SECONDS: z.coerce.number().int().min(5).max(120).default(30),
+  /** Calls a user may start per minute. */
+  RATE_LIMIT_CALL_MAX: z.coerce.number().int().positive().default(10),
 
   /**
    * Chooses the outgoing transport explicitly, so moving between environments
