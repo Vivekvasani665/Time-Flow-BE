@@ -14,6 +14,9 @@ export const REDACT_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
   'res.headers["set-cookie"]',
+  // ioredis puts the failed command's arguments on its errors, and for AUTH
+  // those are the Redis username and password.
+  'err.command.args',
 ];
 
 /** Masks secret query parameters (e.g. a password reset `?token=`) in a URL before it is logged. */
