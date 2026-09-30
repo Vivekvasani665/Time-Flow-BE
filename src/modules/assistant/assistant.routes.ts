@@ -2,14 +2,27 @@ import Groq from 'groq-sdk';
 import { Router, type Request, type Response } from 'express';
 import { env } from '../../config/env';
 import { logger } from '../../lib/logger';
-import { AppError } from '../../common/errors';
+import { AppError, BadRequestError } from '../../common/errors';
 import { ok } from '../../common/http/response';
 import { authenticate } from '../../common/middleware/authenticate';
 import { getRequestContext } from '../../common/utils/request-context';
+import { attachmentUpload, readDocument } from './assistant.attachments';
 import { ASSISTANT_DISABLED_MESSAGE, ASSISTANT_NAME, assistantChatSchema, assistantService, type AssistantEvent } from './assistant.service';
 
 export const assistantRouter = Router();
 assistantRouter.use(authenticate);
+
+/**
+ * Reads the text out of a document for the next question. Nothing is kept:
+ * the client holds the text and sends it with the conversation.
+ */
+assistantRouter.post('/attachments', attachmentUpload.single('file'), async (req: Request, res: Response) => {
+  const file = req.file;
+  if (!file) throw new BadRequestError('No file uploaded', 'VALIDATION_ERROR', [{ path: 'file', message: 'File is required' }]);
+  // Multer decodes multipart filenames as Latin-1; browsers send UTF-8.
+  const originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+  return ok(res, await readDocument({ originalname, buffer: file.buffer }));
+});
 
 assistantRouter.get('/status', (_req: Request, res: Response) => {
   return ok(res, { enabled: assistantService.enabled(), name: ASSISTANT_NAME, model: env.ASSISTANT_MODEL });
@@ -20,6 +33,8 @@ function describe(err: unknown): string {
   // Groq's free tier has per-minute limits; this is the usual cause of a refusal.
   if (err instanceof Groq.RateLimitError) return 'The assistant is busy right now (usage limit reached). Please try again in a minute.';
   if (err instanceof Groq.AuthenticationError) return "The assistant's Groq API key is invalid or revoked. Please tell an administrator.";
+  // Groq answers 413 when a request is over the plan's tokens-per-minute size, usually a big attached file.
+  if (err instanceof Groq.APIError && err.status === 413) return 'That was too much text for the assistant at once. Try a shorter file, or ask about one part of it.';
   if (err instanceof Groq.APIConnectionError) return "The assistant couldn't be reached. Please try again.";
   if (err instanceof Groq.APIError && (err.status ?? 0) >= 500) return 'The assistant is having trouble right now. Please try again shortly.';
   return 'Something went wrong while answering. Please try again.';

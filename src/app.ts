@@ -67,6 +67,8 @@ export function createApp({ enableBullBoard = !isTest }: AppOptions = {}): Expre
       maxAge: 600,
     }),
   );
+  // Assistant questions carry attached document text and images; everything else stays small.
+  app.use('/api/assistant/chat', express.json({ limit: '8mb' }));
   app.use(express.json({ limit: '100kb' }));
   app.use(cookieParser());
 

@@ -61,6 +61,51 @@ describe('Assistant API', () => {
     expect((await ask(employee, history)).status).toBe(200);
   });
 
+  it('accepts attached documents and images with a question', async () => {
+    vi.spyOn(assistantService, 'enabled').mockReturnValue(true);
+    const reply = vi.spyOn(assistantService, 'reply').mockImplementation(async (_a, _i, emit) => emit({ type: 'done' }));
+    const image = { kind: 'image', name: 'board.png', dataUrl: `data:image/png;base64,${'A'.repeat(200_000)}` };
+    const doc = { kind: 'document', name: 'notes.txt', text: 'Launch plan\n- Write docs\n- Test login' };
+    expect((await ask(employee, [{ role: 'user', content: '', attachments: [doc, image] }])).status).toBe(200);
+    expect(reply.mock.calls[0]![1].messages[0]).toMatchObject({ attachments: [doc, image] });
+  });
+
+  it('validates attachments', async () => {
+    vi.spyOn(assistantService, 'enabled').mockReturnValue(true);
+    vi.spyOn(assistantService, 'reply').mockImplementation(async (_a, _i, emit) => emit({ type: 'done' }));
+    const img = (name: string) => ({ kind: 'image', name, dataUrl: 'data:image/png;base64,AAAA' });
+    // No text and no file.
+    expect((await ask(employee, [{ role: 'user', content: '', attachments: [] }])).status).toBe(400);
+    // Not an image data URL.
+    expect((await ask(employee, [{ role: 'user', content: 'hi', attachments: [{ kind: 'image', name: 'x.svg', dataUrl: 'data:image/svg+xml;base64,AAAA' }] }])).status).toBe(400);
+    // Too many images.
+    expect((await ask(employee, [{ role: 'user', content: 'hi', attachments: ['a', 'b', 'c', 'd', 'e'].map(img) }])).status).toBe(400);
+    // Too much document text in total.
+    const big = { kind: 'document', name: 'big.txt', text: 'x'.repeat(60_000) };
+    expect((await ask(employee, [{ role: 'user', content: 'hi', attachments: [big, big, { ...big, text: 'more' }] }])).status).toBe(400);
+    // Attachments only come from the user.
+    expect((await ask(employee, [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b', attachments: [img('a')] }, { role: 'user', content: 'c' }])).status).toBe(400);
+  });
+
+  it('reads the text out of an attached document', async () => {
+    const upload = (name: string, body: Buffer | string) =>
+      employee.auth(api().post('/api/assistant/attachments')).attach('file', Buffer.from(body), name);
+    const res = await upload('plan.csv', 'task,owner\r\nDocs,Priya\r\n\r\n\r\n\r\nTests,Amit\r\n');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ name: 'plan.csv', text: 'task,owner\nDocs,Priya\n\nTests,Amit', truncated: false });
+
+    const long = await upload('long.txt', 'a'.repeat(70_000));
+    expect(long.body.data).toMatchObject({ truncated: true });
+    expect(long.body.data.text).toHaveLength(60_000);
+
+    expect((await upload('virus.exe', 'MZ')).body).toMatchObject({ code: 'UNSUPPORTED_FILE_TYPE' });
+    expect((await upload('fake.pdf', 'not a pdf')).body).toMatchObject({ code: 'UNREADABLE_FILE' });
+    expect((await upload('fake.docx', 'not a zip')).body).toMatchObject({ code: 'UNREADABLE_FILE' });
+    expect((await upload('binary.txt', Buffer.from([1, 0, 2]))).body).toMatchObject({ code: 'UNREADABLE_FILE' });
+    expect((await upload('empty.md', '   ')).body).toMatchObject({ code: 'UNREADABLE_FILE' });
+    expect((await api().post('/api/assistant/attachments').attach('file', Buffer.from('x'), 'a.txt')).status).toBe(401);
+  });
+
   it('streams the reply as server-sent events', async () => {
     vi.spyOn(assistantService, 'enabled').mockReturnValue(true);
     vi.spyOn(assistantService, 'reply').mockImplementation(async (_actor, _input, emit) => {
