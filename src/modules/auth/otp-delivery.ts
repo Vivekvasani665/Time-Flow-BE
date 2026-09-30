@@ -80,6 +80,22 @@ type Recipient = { id: string; phone: string | null };
  * only when no channel got it; `noneDelivered` builds that error so each flow
  * keeps its own error code. Never logs or returns the code.
  */
+/**
+ * Longest a sign-in or sign-up request waits for one channel. The browser
+ * reaches the API through the frontend's proxy, which gives up after its own
+ * timeout; answering well before it means the user reads "we couldn't send
+ * your code" instead of a bare 500.
+ */
+export const OTP_CHANNEL_TIMEOUT_MS = 20_000;
+
+function withinDeadline<T>(work: Promise<T>, channel: OtpChannel): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${channel} delivery timed out after ${OTP_CHANNEL_TIMEOUT_MS / 1000}s`)), OTP_CHANNEL_TIMEOUT_MS);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
 export async function deliverOtp(opts: {
   user: Recipient;
   otp: string;
@@ -103,7 +119,7 @@ export async function deliverOtp(opts: {
     return messageId;
   };
 
-  const results = await Promise.allSettled(opts.channels.map(send));
+  const results = await Promise.allSettled(opts.channels.map((channel) => withinDeadline(send(channel), channel)));
   const delivered: OtpChannel[] = [];
   const delivery: OtpDelivery = {};
   results.forEach((r, i) => {

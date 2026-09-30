@@ -61,6 +61,13 @@ type EnvTransport = {
   options: Parameters<typeof nodemailer.createTransport>[0];
 };
 
+/**
+ * Nodemailer waits up to two minutes to connect by default. A blocked SMTP
+ * port (Render's free plan blocks them all) would then hold a sign-up request
+ * far past any proxy timeout; fail within seconds instead.
+ */
+export const SMTP_TIMEOUTS = { connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 } as const;
+
 /** A host that can only ever be a local catcher, never a real relay. */
 const isLoopback = (host: string) => /^(127\.0\.0\.1|::1|localhost|mailpit)$/i.test(host);
 
@@ -83,7 +90,7 @@ export function resolveEnvTransport(): EnvTransport {
         from: env.SMTP_FROM,
         external: false,
         // Mailpit is an open relay and rejects an AUTH attempt, so never authenticate.
-        options: { host: env.SMTP_HOST ?? 'localhost', port: env.SMTP_PORT, secure: false },
+        options: { host: env.SMTP_HOST ?? 'localhost', port: env.SMTP_PORT, secure: false, ...SMTP_TIMEOUTS },
       };
 
     case 'gmail': {
@@ -100,6 +107,7 @@ export function resolveEnvTransport(): EnvTransport {
           host: 'smtp.gmail.com',
           port: 587,
           secure: false,
+          ...SMTP_TIMEOUTS,
           ...(user && pass ? { auth: { user, pass } } : {}),
         },
       };
@@ -122,6 +130,7 @@ export function resolveEnvTransport(): EnvTransport {
           host: env.SMTP_HOST ?? 'localhost',
           port: env.SMTP_PORT,
           secure: env.SMTP_SECURE,
+          ...SMTP_TIMEOUTS,
           ...(env.SMTP_USER && env.SMTP_PASS ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS } } : {}),
         },
       };
@@ -183,7 +192,7 @@ async function getConfiguredTransport(): Promise<{ transport: Transporter; from:
   const key = `${options.host}:${options.port}:${options.secure}:${options.auth.user}:${options.auth.pass.length}:${from}`;
   if (configuredTransport?.key !== key) {
     configuredTransport?.transport.close();
-    configuredTransport = { key, transport: nodemailer.createTransport(options), from };
+    configuredTransport = { key, transport: nodemailer.createTransport({ ...options, ...SMTP_TIMEOUTS }), from };
     logger.info({ host: options.host, port: options.port, user: options.auth.user }, 'using mail account configured in the app');
   }
   return { transport: configuredTransport.transport, from: configuredTransport.from };
