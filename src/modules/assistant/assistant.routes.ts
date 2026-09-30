@@ -5,7 +5,7 @@ import { logger } from '../../lib/logger';
 import { AppError } from '../../common/errors';
 import { ok } from '../../common/http/response';
 import { authenticate } from '../../common/middleware/authenticate';
-import { requireAuth } from '../../common/utils/request-context';
+import { getRequestContext } from '../../common/utils/request-context';
 import { ASSISTANT_DISABLED_MESSAGE, ASSISTANT_NAME, assistantChatSchema, assistantService, type AssistantEvent } from './assistant.service';
 
 export const assistantRouter = Router();
@@ -31,7 +31,8 @@ function describe(err: unknown): string {
  * disabled check and the rate limit are answered as normal JSON errors first.
  */
 assistantRouter.post('/chat', async (req: Request, res: Response) => {
-  const actor = requireAuth(req);
+  const ctx = getRequestContext(req);
+  const { actor } = ctx;
   const input = assistantChatSchema.parse(req.body);
   if (!assistantService.enabled()) {
     throw new AppError(503, 'ASSISTANT_DISABLED', ASSISTANT_DISABLED_MESSAGE);
@@ -55,7 +56,7 @@ assistantRouter.post('/chat', async (req: Request, res: Response) => {
   };
 
   try {
-    await assistantService.reply(actor, input, emit, abort.signal);
+    await assistantService.reply(ctx, input, emit, abort.signal);
   } catch (err) {
     if (abort.signal.aborted) return;
     logger.error({ err, userId: actor.id }, 'assistant reply failed');

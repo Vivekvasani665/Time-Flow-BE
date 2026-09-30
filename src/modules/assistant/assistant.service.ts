@@ -6,7 +6,7 @@ import { logger } from '../../lib/logger';
 import { redis } from '../../lib/redis';
 import { SlidingWindowRateLimiter } from '../../cache/rate-limiter';
 import { AppError, RateLimitError } from '../../common/errors';
-import { fullName } from '../../common/utils/request-context';
+import { fullName, type RequestContext } from '../../common/utils/request-context';
 import type { AuthContext } from '../auth/auth.types';
 import { assistantTools, TOOL_STATUS, type AssistantTool } from './assistant.tools';
 
@@ -19,12 +19,11 @@ export const assistantChatSchema = z
   .object({
     messages: z
       .array(
-        z
-          .object({
-            role: z.enum(['user', 'assistant']),
-            content: z.string().trim().min(1).max(4000, 'Please keep your message under 4000 characters.'),
-          })
-          .strict(),
+        z.discriminatedUnion('role', [
+          z.object({ role: z.literal('user'), content: z.string().trim().min(1).max(4000, 'Please keep your message under 4000 characters.') }).strict(),
+          // The assistant's own earlier replies come back with the history and can be long.
+          z.object({ role: z.literal('assistant'), content: z.string().trim().min(1).max(20000) }).strict(),
+        ]),
       )
       .min(1)
       .max(40, 'This conversation is too long. Start a new one to keep going.')
@@ -48,11 +47,19 @@ function systemPrompt(actor: AuthContext): string {
   return [
     `You are ${ASSISTANT_NAME}, the assistant built into TimeFlow, a team project and task management app.`,
     `You are talking with ${fullName(actor)} (role: ${actor.roleName}).`,
-    'You are a capable general-purpose AI assistant. Answer any question well — coding, writing, explanations, brainstorming, planning, maths and general knowledge — the way a helpful expert would.',
-    'For questions about their TimeFlow data (projects, tasks, deadlines, workload, dashboard numbers), use the tools to look up real data before answering, and never invent tasks, projects, people or numbers. If a tool says the user lacks permission, tell them so. Do not call tools for questions that have nothing to do with TimeFlow.',
-    'You can read TimeFlow data but not change it. If asked to create, edit, assign or delete something, say which TimeFlow page to use (Projects or Tasks). You cannot see the screen, so do not describe specific buttons, menus or steps.',
-    'Replies are rendered as Markdown (GitHub flavour): use headings, lists, tables, **bold** and fenced code blocks with a language tag when they help. Match the length to the question — short for simple questions, thorough for complex ones. Reply in the language the user writes in.',
-    `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+    'You help with work: TimeFlow projects and tasks, planning, writing (emails, messages, task descriptions, summaries), explanations and general questions, and translation between any languages.',
+    'You do not do programming. Do not write, explain, review or debug code, scripts, queries or formulas in any language, even small snippets. If asked, say briefly that coding is outside what you do here and offer the kinds of help you can give.',
+    'For questions about TimeFlow data (projects, tasks, deadlines, workload, dashboard numbers), use the tools to look up real data before answering, and never invent tasks, projects, people, ids or numbers. If a tool reports an error or missing permission, tell the user plainly. Do not call tools for questions that have nothing to do with TimeFlow.',
+    [
+      'You can create and assign tasks with create_tasks and assign_task. Work out the project with list_projects (and people with list_project_members) instead of asking for ids.',
+      'If the user does not name an assignee, or asks you to pick, use automatic assignment (the least busy project member). "Everyone" / "all users" / "all members" means one copy of the task for each member of the project.',
+      'If the project is unclear and more than one could fit, ask which one, listing the likely choices. If the title is missing, ask for it. Otherwise act straight away without asking for confirmation, except that before creating more than 5 tasks at once you first say how many and for whom and wait for a yes.',
+      'After acting, confirm what was done: each task title with who it went to, plus anything that failed and why.',
+      'You cannot delete tasks, edit projects or manage users; point the user to the Tasks or Projects page for those. You cannot see the screen, so do not describe specific buttons or menus.',
+    ].join(' '),
+    'Translation: when asked to translate, give the translation directly (keeping names, dates and formatting), with a short note only when a phrase is ambiguous. Task titles and descriptions are saved exactly as the user wants them; translate them only when asked.',
+    'Always reply in the language and script the user writes in (for example Hindi, Gujarati, or Hinglish in Latin letters), unless they ask for another. Replies are rendered as Markdown: use short lists, tables and **bold** where they help, and keep answers as short as the question allows.',
+    `Today's date is ${new Date().toISOString().slice(0, 10)}. Resolve relative dates like "tomorrow" or "next Friday" from it when setting due dates.`,
   ].join('\n\n');
 }
 
@@ -84,7 +91,7 @@ async function runTool(tools: AssistantTool[], name: string, rawArgs: string, us
     return await tool.run(parsed.data as never);
   } catch (err) {
     logger.error({ err, tool: name, userId }, 'assistant tool failed');
-    return JSON.stringify({ error: 'That lookup failed. Tell the user to try again.' });
+    return JSON.stringify({ error: 'That step failed. Tell the user to try again.' });
   }
 }
 
@@ -110,10 +117,11 @@ export const assistantService = {
   },
 
   /** Runs one assistant turn, calling tools as needed, and reports progress through `emit`. */
-  async reply(actor: AuthContext, input: AssistantChatInput, emit: (event: AssistantEvent) => void, signal: AbortSignal): Promise<void> {
+  async reply(ctx: RequestContext, input: AssistantChatInput, emit: (event: AssistantEvent) => void, signal: AbortSignal): Promise<void> {
     if (!client) throw new AppError(503, 'ASSISTANT_DISABLED', ASSISTANT_DISABLED_MESSAGE);
 
-    const tools = assistantTools(actor);
+    const { actor } = ctx;
+    const tools = assistantTools(ctx);
     const groqTools = toGroqTools(tools);
     const messages: ChatCompletionMessageParam[] = [{ role: 'system', content: systemPrompt(actor) }, ...input.messages];
 
