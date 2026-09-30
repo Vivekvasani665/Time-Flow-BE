@@ -1,5 +1,4 @@
 {
-  "name": "timeflow-backend",
   "version": "1.0.0",
   "private": true,
   "description": "TimeFlow API server and background worker",
