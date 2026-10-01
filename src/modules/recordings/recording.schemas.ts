@@ -3,7 +3,8 @@ import { env } from '../../config/env';
 import { listQuerySchema } from '../../common/http/pagination';
 import { boolQuery, optionalText, trimmed } from '../../common/utils/validation';
 
-export const RECORDING_TYPES = ['FULL_SCREEN', 'WINDOW', 'BROWSER_TAB', 'SCREEN_WEBCAM', 'WEBCAM'] as const;
+/** Entire display, entire display + webcam, or webcam alone. Single-window / single-tab capture is not supported. */
+export const RECORDING_TYPES = ['FULL_SCREEN', 'SCREEN_WEBCAM', 'WEBCAM'] as const;
 
 /** Container formats MediaRecorder produces: WebM (Chrome, Edge, Firefox) and MP4 (Safari). */
 export const VIDEO_TYPES = { 'video/webm': '.webm', 'video/mp4': '.mp4' } as const;

@@ -130,7 +130,7 @@ const crud = (opts: {
   },
 });
 
-const RECORDING_TYPE = enumOf('FULL_SCREEN', 'WINDOW', 'BROWSER_TAB', 'SCREEN_WEBCAM', 'WEBCAM');
+const RECORDING_TYPE = enumOf('FULL_SCREEN', 'SCREEN_WEBCAM', 'WEBCAM');
 const SIGNED_REQUEST: Schema = {
   type: 'object',
   properties: { url: str(), method: enumOf('PUT'), headers: { type: 'object', additionalProperties: str() }, expiresAt: dateTime },
