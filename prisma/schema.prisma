@@ -117,6 +117,7 @@ model User {
   chatReadState    ChatReadState?
   callsMade        Call[]                  @relation("CallCaller")
   callsReceived    Call[]                  @relation("CallReceiver")
+  recordings       Recording[]
 
   @@index([roleId])
   @@index([status, deletedAt])
@@ -181,10 +182,11 @@ model Project {
   updatedAt   DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
   deletedAt   DateTime?     @map("deleted_at") @db.Timestamptz(3)
 
-  manager   User            @relation("ProjectManager", fields: [managerId], references: [id], onDelete: Restrict)
-  createdBy User?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  members   ProjectMember[]
-  tasks     Task[]
+  manager    User            @relation("ProjectManager", fields: [managerId], references: [id], onDelete: Restrict)
+  createdBy  User?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  members    ProjectMember[]
+  tasks      Task[]
+  recordings Recording[]
 
   @@index([status, deletedAt])
   @@index([managerId])
@@ -370,6 +372,54 @@ model Call {
   /// History between two people, newest first (queried in both directions).
   @@index([callerId, receiverId, createdAt(sort: Desc)])
   @@map("calls")
+}
+
+enum RecordingType {
+  FULL_SCREEN
+  WINDOW
+  BROWSER_TAB
+  SCREEN_WEBCAM
+  WEBCAM
+}
+
+/// UPLOADING: a signed upload URL was issued, the file is not confirmed yet.
+/// READY: the server checked the stored file; only these rows are ever listed.
+enum RecordingStatus {
+  UPLOADING
+  READY
+}
+
+/// A screen / webcam recording made in the browser. The video itself lives in
+/// object storage (R2) under `storageKey`; this row holds metadata only. A
+/// recording is visible to its owner and, when attached to a project, to
+/// everyone who can see that project.
+model Recording {
+  id            String          @id @default(uuid()) @db.Uuid
+  userId        String          @map("user_id") @db.Uuid
+  projectId     String?         @map("project_id") @db.Uuid
+  title         String          @db.VarChar(160)
+  description   String?         @db.VarChar(2000)
+  tags          String[]        @default([]) @db.VarChar(40)
+  /// Server-generated, e.g. recordings/<userId>/<id>/video.webm. Never client input.
+  storageKey    String          @unique @map("storage_key") @db.VarChar(255)
+  thumbnailKey  String?         @map("thumbnail_key") @db.VarChar(255)
+  mimeType      String          @map("mime_type") @db.VarChar(127)
+  /// Bytes, as measured in storage once the upload completes.
+  fileSize      BigInt          @default(0) @map("file_size")
+  /// Seconds.
+  duration      Int?
+  recordingType RecordingType   @map("recording_type")
+  status        RecordingStatus @default(UPLOADING)
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, createdAt(sort: Desc)])
+  @@index([projectId, status])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("recordings")
 }
 
 /// A passkey (WebAuthn credential) used as a second factor: Face ID, Touch ID,

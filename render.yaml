@@ -57,6 +57,18 @@ services:
         sync: false
       - key: CALL_TURN_SECRET
         sync: false
+      # Recordings: Render's disk is wiped on every deploy, so store them in
+      # Cloudflare R2 (see README → Recordings for the bucket and CORS setup).
+      - key: STORAGE_DRIVER
+        value: r2
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
       # Free instances cannot open outbound SMTP ports, so mail is logged
       # rather than sent. To deliver on the free plan use an HTTPS provider:
       # resend / sendgrid / brevo plus its API key and EMAIL_FROM (a verified

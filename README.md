@@ -86,6 +86,57 @@ Browsers only allow the camera and microphone on `https://` (or `localhost`).
 To try calls locally, sign in as two different users in two browsers (or a
 normal and a private window); one account can't call itself.
 
+## Recordings (screen & webcam)
+
+Loom-style recordings live under `/recordings` in the app. Recording happens
+entirely in the browser (`getDisplayMedia`, `getUserMedia`, `MediaRecorder`);
+nothing is uploaded until the user reviews the video and presses **Save
+Recording**. Saving is three steps, and the video never passes through the API
+or PostgreSQL:
+
+1. `POST /api/recordings/upload-url` — reserves a recording, returns a signed PUT URL
+2. the browser PUTs the file straight to object storage
+3. `POST /api/recordings/complete` — the server reads the stored object back
+   (size, file signature), checks project access, and stores the metadata
+
+`GET /api/recordings`, `GET /api/recordings/:id` (signed playback and download
+URLs) and `DELETE /api/recordings/:id` complete the API. A recording is visible to
+its owner; attaching it to a project shares it with that project's members. The
+owner, the project's manager, or anyone with `recordings.manage_all` (Super
+Admin and Admin by default) can delete it.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `STORAGE_DRIVER` | `local` | `r2` for Cloudflare R2 (or any S3-compatible bucket). `local` keeps files in `LOCAL_STORAGE_DIR` — fine for development, but wiped on hosts with ephemeral disks |
+| `LOCAL_STORAGE_DIR` | `./storage` | Private: served only through expiring signed URLs at `/api/storage/…`, never under `/uploads` |
+| `R2_ACCOUNT_ID` | — | Cloudflare account id; the endpoint becomes `https://<id>.r2.cloudflarestorage.com` |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | — | An R2 API token with **Object Read & Write** on the bucket. Never sent to browsers |
+| `R2_BUCKET` | — | Keep it private (no public access, no r2.dev URL) |
+| `R2_ENDPOINT` | — | Overrides the endpoint (EU jurisdiction, MinIO, S3) |
+| `R2_REGION` | `auto` | Leave `auto` for R2 |
+| `RECORDING_MAX_BYTES` | `1073741824` (1 GiB) | Checked before issuing the URL and again against the stored object |
+| `RECORDING_UPLOAD_URL_TTL_SECONDS` | `3600` | Lifetime of a signed upload URL |
+| `RECORDING_PLAYBACK_URL_TTL_SECONDS` | `3600` | Lifetime of signed playback / download / thumbnail URLs |
+
+**R2 setup.** Create a bucket (Cloudflare dashboard → R2), then an API token
+scoped to it with Object Read & Write. The browser uploads and plays directly
+against R2, so the bucket needs a CORS policy (R2 → bucket → Settings → CORS):
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://your-timeflow-frontend.example"],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag", "Content-Length", "Content-Range"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Optionally add a lifecycle rule deleting objects under `recordings/` that are
+never confirmed — the API also sweeps a user's abandoned uploads after 24 hours.
+
 ## Production
 
 ```bash
