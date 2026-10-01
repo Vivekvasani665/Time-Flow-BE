@@ -48,6 +48,9 @@ export const PERMISSION_CATALOG = {
   chat: {
     moderate: 'Delete any chat message',
   },
+  recordings: {
+    manage_all: 'View and delete every recording (lifts data scoping)',
+  },
 } as const;
 
 type Catalog = typeof PERMISSION_CATALOG;

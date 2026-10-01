@@ -130,6 +130,34 @@ const crud = (opts: {
   },
 });
 
+const RECORDING_TYPE = enumOf('FULL_SCREEN', 'WINDOW', 'BROWSER_TAB', 'SCREEN_WEBCAM', 'WEBCAM');
+const SIGNED_REQUEST: Schema = {
+  type: 'object',
+  properties: { url: str(), method: enumOf('PUT'), headers: { type: 'object', additionalProperties: str() }, expiresAt: dateTime },
+};
+const RECORDING: Schema = {
+  type: 'object',
+  properties: {
+    id: uuid,
+    title: str(),
+    description: nullable(str()),
+    tags: arrayOf(str()),
+    mimeType: str({ example: 'video/webm' }),
+    fileSize: { ...int, description: 'Bytes, as measured in storage' },
+    duration: nullable({ ...int, description: 'Seconds' }),
+    recordingType: RECORDING_TYPE,
+    createdAt: dateTime,
+    updatedAt: dateTime,
+    owner: { type: 'object', properties: { id: uuid, firstName: str(), lastName: str(), email: str(), avatarUrl: nullable(str()) } },
+    project: nullable({ type: 'object', properties: { id: uuid, name: str() } }),
+    thumbnailUrl: nullable(str()),
+    canDelete: bool,
+  },
+};
+const RECORDING_DETAIL: Schema = {
+  allOf: [RECORDING, { type: 'object', properties: { playbackUrl: str(), downloadUrl: str(), urlsExpireAt: dateTime } }],
+};
+
 const errorResponse = (description: string, code: string, message: string): Schema => ({
   description,
   content: { 'application/json': { schema: ref('Error'), example: { success: false, code, message, requestId: 'b1f0c3e2-…' } } },
@@ -166,6 +194,13 @@ export const openApiDocument = {
     { name: 'Dashboard' },
     { name: 'Notifications' },
     { name: 'Uploads' },
+    {
+      name: 'Recordings',
+      description:
+        'Screen / webcam recordings. Recorded in the browser; saved by (1) `POST /api/recordings/upload-url`, ' +
+        '(2) PUT the file to the returned signed URL with the returned headers, (3) `POST /api/recordings/complete`. ' +
+        'Video bytes never pass through this API or the database.',
+    },
     { name: 'Emails' },
     { name: 'Queues' },
     { name: 'Health' },
@@ -1329,6 +1364,94 @@ export const openApiDocument = {
           '413': errorResponse('File too large', 'PAYLOAD_TOO_LARGE', 'File is too large'),
           ...errors(400, 401),
         },
+      },
+    },
+
+    '/api/recordings': {
+      get: {
+        tags: ['Recordings'],
+        summary: 'List recordings',
+        description:
+          'Your own recordings plus those attached to projects you can see (everything with `recordings.manage_all`). ' +
+          '`thumbnailUrl` is a short-lived signed URL.',
+        security: secured,
+        parameters: [
+          ...listParams(['createdAt', 'title', 'duration', 'fileSize']),
+          q('recordingType', RECORDING_TYPE),
+          q('projectId', uuid),
+          q('mine', enumOf('true', 'false'), 'Only recordings you made'),
+        ],
+        responses: { '200': paginatedOf(RECORDING), ...errors(400, 401) },
+      },
+    },
+    '/api/recordings/upload-url': {
+      post: {
+        tags: ['Recordings'],
+        summary: 'Start saving a recording',
+        description:
+          'Reserves a recording and returns signed PUT URLs for the video and (optionally) its thumbnail. ' +
+          'Send the file with exactly the returned headers. URLs expire after RECORDING_UPLOAD_URL_TTL_SECONDS. ' +
+          'At most 5 unfinished uploads per person; abandoned ones are removed after 24 hours.',
+        security: secured,
+        requestBody: body({
+          type: 'object',
+          required: ['mimeType', 'fileSize', 'recordingType'],
+          properties: {
+            mimeType: str({ example: 'video/webm;codecs=vp9,opus', description: 'video/webm or video/mp4; codec parameters are ignored.' }),
+            fileSize: { ...int, minimum: 1, description: 'Bytes; at most RECORDING_MAX_BYTES.' },
+            recordingType: RECORDING_TYPE,
+            projectId: nullable(uuid),
+            thumbnail: { type: 'object', properties: { mimeType: enumOf('image/jpeg', 'image/webp', 'image/png'), fileSize: { ...int, maximum: 2097152 } } },
+          },
+        }),
+        responses: {
+          '201': success({
+            type: 'object',
+            properties: { recordingId: uuid, maxBytes: int, upload: SIGNED_REQUEST, thumbnailUpload: nullable(SIGNED_REQUEST) },
+          }),
+          ...errors(400, 401, 409, 429),
+        },
+      },
+    },
+    '/api/recordings/complete': {
+      post: {
+        tags: ['Recordings'],
+        summary: 'Finish saving a recording',
+        description:
+          'Confirms the upload. Size and type are read back from storage (the file signature must match), never taken from the client. ' +
+          'Fails with UPLOAD_INCOMPLETE if the file is not in storage yet.',
+        security: secured,
+        requestBody: body({
+          type: 'object',
+          required: ['recordingId', 'title', 'recordingType'],
+          properties: {
+            recordingId: uuid,
+            title: str({ maxLength: 160 }),
+            description: nullable(str({ maxLength: 2000 })),
+            tags: { ...arrayOf(str({ maxLength: 40 })), maxItems: 10 },
+            projectId: nullable(uuid),
+            duration: nullable({ ...int, description: 'Seconds' }),
+            recordingType: RECORDING_TYPE,
+          },
+        }),
+        responses: { '201': success(RECORDING_DETAIL, 'Saved'), '413': errorResponse('Too large', 'RECORDING_TOO_LARGE', 'The recording is larger than the maximum allowed size'), ...errors(400, 401, 404, 409) },
+      },
+    },
+    '/api/recordings/{id}': {
+      parameters: [idParam],
+      get: {
+        tags: ['Recordings'],
+        summary: 'Get a recording',
+        description: 'Includes signed `playbackUrl` and `downloadUrl`, valid until `urlsExpireAt`.',
+        security: secured,
+        responses: { '200': success(RECORDING_DETAIL), ...errors(401, 404) },
+      },
+      delete: {
+        tags: ['Recordings'],
+        summary: 'Delete a recording',
+        description: 'The owner, the manager of the attached project, or `recordings.manage_all`. Removes the stored files too.',
+        security: secured,
+        responses: { '200': success(nullable({ type: 'object' })), ...errors(401, 403, 404) },
       },
     },
 

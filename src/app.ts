@@ -30,6 +30,10 @@ import { adminInvitationRouter, publicInvitationRouter } from './modules/invitat
 import { chatRouter } from './modules/chat/chat.routes';
 import { assistantRouter } from './modules/assistant/assistant.routes';
 import { callRouter } from './modules/calls/call.routes';
+import { recordingRouter } from './modules/recordings/recording.routes';
+import { createLocalStorageRouter } from './modules/storage/storage.routes';
+import { localStorage } from './lib/storage';
+import { LOCAL_STORAGE_ROUTE } from './lib/storage/local-storage';
 import { P } from './modules/permissions/permission-catalog';
 
 export type AppOptions = { enableBullBoard?: boolean };
@@ -96,6 +100,9 @@ export function createApp({ enableBullBoard = !isTest }: AppOptions = {}): Expre
   app.use('/api/chat', chatRouter);
   app.use('/api/assistant', assistantRouter);
   app.use('/api/calls', callRouter);
+  app.use('/api/recordings', recordingRouter);
+  // Signed-URL file endpoint, only when files are kept on this server instead of R2.
+  if (localStorage) app.use(LOCAL_STORAGE_ROUTE, createLocalStorageRouter(localStorage));
   app.use('/api/uploads', uploadRouter);
   app.use('/api/queues', queueRouter);
   // Before /api/emails so the literal path is not eaten by /:id.

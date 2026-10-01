@@ -222,6 +222,31 @@ const EnvSchema = z.object({
   UPLOAD_DIR: z.string().default('./uploads'),
 
   /**
+   * Where recordings (and any future private files) are stored:
+   *   local — a private directory on this server (LOCAL_STORAGE_DIR); fine for
+   *           development, but lost on hosts with an ephemeral disk
+   *   r2    — Cloudflare R2 (or any S3-compatible bucket); needs the R2_* vars
+   * Files are never public: the browser gets short-lived signed URLs only.
+   */
+  STORAGE_DRIVER: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['local', 'r2']).default('local')),
+  /** Never under UPLOAD_DIR, which is served publicly at /uploads. */
+  LOCAL_STORAGE_DIR: z.string().default('./storage'),
+  R2_ACCOUNT_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  R2_ACCESS_KEY_ID: z.string().optional().transform((v) => (v ? v : undefined)),
+  R2_SECRET_ACCESS_KEY: z.string().optional().transform((v) => (v ? v : undefined)),
+  R2_BUCKET: z.string().optional().transform((v) => (v ? v : undefined)),
+  /** Overrides https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com, e.g. for the EU jurisdiction or MinIO. */
+  R2_ENDPOINT: z.preprocess((v) => (v === '' ? undefined : v), z.url().optional()),
+  R2_REGION: z.string().min(1).default('auto'),
+
+  /** Largest recording accepted, in bytes. Default 1 GiB. */
+  RECORDING_MAX_BYTES: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  /** How long a signed upload URL stays valid; a large file on a slow link needs a while. */
+  RECORDING_UPLOAD_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(7 * 24 * 3600).default(3600),
+  /** How long a signed playback / download URL stays valid. */
+  RECORDING_PLAYBACK_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(7 * 24 * 3600).default(3600),
+
+  /**
    * Adds the raw error text to 500 responses as `debug`. Off by default so
    * database errors and file paths never reach a browser; the full error is
    * always in the server log. Ignored in production.
@@ -246,6 +271,14 @@ function loadEnv(): Env {
     MSG91_TEMPLATE_ID: e.MSG91_TEMPLATE_ID || e.SMS_TEMPLATE_ID,
     MSG91_SENDER_ID: e.MSG91_SENDER_ID || e.SMS_SENDER_ID,
   });
+  if (parsed.success && parsed.data.STORAGE_DRIVER === 'r2') {
+    const missing: string[] = (['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET'] as const).filter((k) => !parsed.data[k]);
+    if (!parsed.data.R2_ACCOUNT_ID && !parsed.data.R2_ENDPOINT) missing.push('R2_ACCOUNT_ID');
+    if (missing.length) {
+      process.stderr.write(`Invalid environment configuration:\n${missing.map((k) => `  - ${k}: required when STORAGE_DRIVER=r2`).join('\n')}\n`);
+      process.exit(1);
+    }
+  }
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n');
     // Logger depends on env, so fail fast with plain stderr.
@@ -276,6 +309,7 @@ export function productionWarnings(): string[] {
     warnings.push('LOGIN_OTP_ENABLED is true but no mail provider is configured — sign-in codes cannot be delivered, so nobody can sign in unless a mail account is set up in System → Email delivery.');
   }
   if (env.SMS_PROVIDER === 'log') warnings.push('SMS_PROVIDER is log — signup codes are written to the server log instead of being texted.');
+  if (env.STORAGE_DRIVER === 'local') warnings.push("STORAGE_DRIVER is local — recordings are kept on this server's disk, which many hosts wipe on redeploy. Set STORAGE_DRIVER=r2.");
   if (env.EMAIL_FAILURE_RATE > 0) warnings.push(`EMAIL_FAILURE_RATE is ${env.EMAIL_FAILURE_RATE} — real emails will be failed on purpose.`);
   return warnings;
 }
