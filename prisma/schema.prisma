@@ -374,10 +374,10 @@ model Call {
   @@map("calls")
 }
 
+/// Always a whole display (optionally with a webcam bubble), or the webcam
+/// alone. Recording a single window or browser tab is deliberately not offered.
 enum RecordingType {
   FULL_SCREEN
-  WINDOW
-  BROWSER_TAB
   SCREEN_WEBCAM
   WEBCAM
 }

@@ -88,7 +88,11 @@ normal and a private window); one account can't call itself.
 
 ## Recordings (screen & webcam)
 
-Loom-style recordings live under `/recordings` in the app. Recording happens
+Loom-style recordings live under `/recordings` in the app, in three modes:
+**Full Screen**, **Full Screen + Webcam** and **Webcam Only**. Screen recordings
+always capture an entire display the user picks in the browser's own sharing
+dialog (a window or single tab is refused), so recording continues while they
+switch tabs and apps, until they press Stop or end sharing. Recording happens
 entirely in the browser (`getDisplayMedia`, `getUserMedia`, `MediaRecorder`);
 nothing is uploaded until the user reviews the video and presses **Save
 Recording**. Saving is three steps, and the video never passes through the API

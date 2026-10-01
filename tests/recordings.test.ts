@@ -155,7 +155,7 @@ describe('Recording upload flow', () => {
     expect(row.status).toBe('READY');
 
     // Completing twice is refused.
-    const again = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'x', recordingType: 'WINDOW' });
+    const again = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'x', recordingType: 'FULL_SCREEN' });
     expect(again.status).toBe(404);
   });
 
@@ -176,14 +176,14 @@ describe('Recording upload flow', () => {
     const up = await startUpload(employee, { thumbnail: { mimeType: 'image/jpeg', fileSize: 10 } });
     await put(up.upload, WEBM);
     await put(up.thumbnailUpload!, Buffer.from('not a jpeg'));
-    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'No thumb', recordingType: 'WINDOW' });
+    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'No thumb', recordingType: 'FULL_SCREEN' });
     expect(res.status).toBe(201);
     expect(res.body.data.thumbnailUrl).toBeNull();
   });
 
   it('refuses to complete before the file is uploaded', async () => {
     const up = await startUpload(employee);
-    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Early', recordingType: 'WINDOW' });
+    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Early', recordingType: 'FULL_SCREEN' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('UPLOAD_INCOMPLETE');
     await prisma.recording.delete({ where: { id: up.recordingId } });
@@ -192,19 +192,24 @@ describe('Recording upload flow', () => {
   it('rejects a file whose bytes are not the declared video type and removes it', async () => {
     const up = await startUpload(employee);
     await put(up.upload, Buffer.from('<html>definitely not a video</html>'));
-    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Fake', recordingType: 'WINDOW' });
+    const res = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Fake', recordingType: 'FULL_SCREEN' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('UNSUPPORTED_FILE_TYPE');
     expect(await prisma.recording.findUnique({ where: { id: up.recordingId } })).toBeNull();
   });
 
   it('validates MIME type and size before issuing a URL', async () => {
-    const bad = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'application/x-msdownload', fileSize: 10, recordingType: 'WINDOW' });
+    const bad = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'application/x-msdownload', fileSize: 10, recordingType: 'FULL_SCREEN' });
     expect(bad.status).toBe(400);
-    const big = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: env.RECORDING_MAX_BYTES + 1, recordingType: 'WINDOW' });
+    const big = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: env.RECORDING_MAX_BYTES + 1, recordingType: 'FULL_SCREEN' });
     expect(big.status).toBe(400);
     const type = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType: 'SCREENSHOT' });
     expect(type.status).toBe(400);
+    // Single-window and single-tab recording were removed: only whole displays (and the webcam) are accepted.
+    for (const recordingType of ['WINDOW', 'BROWSER_TAB']) {
+      const res = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType });
+      expect(res.status).toBe(400);
+    }
   });
 
   it('enforces the size limit and signature on the upload URL itself', async () => {
@@ -214,7 +219,7 @@ describe('Recording upload flow', () => {
     expect(await streamUpload(up.upload.url, { ...up.upload.headers, 'Content-Length': String(over) }, over)).toBe(413);
     // Not declared (chunked): cut off once the limit is crossed, and nothing is kept.
     expect(await streamUpload(up.upload.url, { ...up.upload.headers, 'Transfer-Encoding': 'chunked' }, over)).toBe(413);
-    const incomplete = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Big', recordingType: 'WINDOW' });
+    const incomplete = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Big', recordingType: 'FULL_SCREEN' });
     expect(incomplete.body.code).toBe('UPLOAD_INCOMPLETE');
     const wrongType = await api().put(up.upload.url).set('Content-Type', 'text/html').send(WEBM);
     expect(wrongType.status).toBe(403);
@@ -226,7 +231,7 @@ describe('Recording upload flow', () => {
   it('only lets the owner complete their upload', async () => {
     const up = await startUpload(employee);
     await put(up.upload, WEBM);
-    const res = await manager.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Hijack', recordingType: 'WINDOW' });
+    const res = await manager.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Hijack', recordingType: 'FULL_SCREEN' });
     expect(res.status).toBe(404);
     await prisma.recording.delete({ where: { id: up.recordingId } });
   });
@@ -235,7 +240,7 @@ describe('Recording upload flow', () => {
     const before = await prisma.recording.count({ where: { userId: manager.userId, status: 'UPLOADING' } });
     const ids: string[] = [];
     for (let i = before; i < 5; i++) ids.push((await startUpload(manager)).recordingId);
-    const res = await manager.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType: 'WINDOW' });
+    const res = await manager.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType: 'FULL_SCREEN' });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('TOO_MANY_PENDING_UPLOADS');
     await prisma.recording.deleteMany({ where: { id: { in: ids } } });
@@ -275,13 +280,13 @@ describe('Recording access', () => {
   });
 
   it('refuses to attach a recording to a project the user cannot see', async () => {
-    const res = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType: 'WINDOW', projectId: privateProjectId });
+    const res = await employee.auth(api().post('/api/recordings/upload-url')).send({ mimeType: 'video/webm', fileSize: 10, recordingType: 'FULL_SCREEN', projectId: privateProjectId });
     expect(res.status).toBe(400);
     expect(res.body.details[0].path).toBe('projectId');
 
     const up = await startUpload(employee);
     await put(up.upload, WEBM);
-    const complete = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Sneaky', recordingType: 'WINDOW', projectId: privateProjectId });
+    const complete = await employee.auth(api().post('/api/recordings/complete')).send({ recordingId: up.recordingId, title: 'Sneaky', recordingType: 'FULL_SCREEN', projectId: privateProjectId });
     expect(complete.status).toBe(400);
     await prisma.recording.delete({ where: { id: up.recordingId } });
   });
